@@ -1,0 +1,13 @@
+Vendored snapshot of MIR — https://github.com/vnmakarov/mir
+Upstream commit: 99c65079038f3ba9242ef646f308c266cfd7a8e5
+
+Contents: the top-level core/JIT sources only — mir*.c, mir*.h, and
+real-time.h — which is everything mir.c and mir-gen.c need (arch-specific
+.c files are #included conditionally, so all are vendored for portability).
+The c2mir frontend (c2mir/) and tests/benchmarks are intentionally excluded.
+
+License: see LICENSE in this directory (MIT, (c) Vladimir Makarov).
+
+To update: copy mir*.c, mir*.h, real-time.h, LICENSE from a newer MIR
+checkout, bump the commit above, and run `dub test` (the ABI static asserts
+fail loudly if any struct size or enum value drifts).

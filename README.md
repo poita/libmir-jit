@@ -39,10 +39,18 @@ not replicated.
 ## Requirements
 
 - A D compiler (LDC recommended) and dub.
-- A C compiler (`cc`) and `git` — MIR's C sources are fetched (pinned commit)
-  and compiled automatically by `scripts/build-mir.sh`, which dub runs via
-  `preGenerateCommands`. The objects land in `.mir-build/` and are linked in
-  through `lflags`. No system MIR install needed.
+- A C compiler (`cc`).
+
+MIR's C sources are **vendored** under [`c/mir/`](c/mir) (pinned snapshot, see
+`c/mir/MIR-VERSION.txt`). The default `bundled` configuration compiles them with
+`cc` (via `preGenerateCommands`) into `.mir-build/` and links the objects — no
+network, no git, no system install. A `system` configuration is also provided
+for linking a preinstalled `libmir` instead:
+
+```sh
+dub build                      # bundled (default): compiles vendored MIR
+dub build --config=system      # link -lmir from the system instead
+```
 
 ## Usage
 
@@ -87,9 +95,9 @@ present for completeness.
 
 ## Regenerating after a MIR update
 
-Enum values are derived from the header. If you bump the pinned MIR commit in
-`scripts/build-mir.sh`, re-verify the enums and struct sizes — `dub test` will
-fail loudly if any `MIR_op_t`/enum value drifts.
+Enum values are derived from the header. To update MIR, refresh the vendored
+snapshot under `c/mir/` (see `c/mir/MIR-VERSION.txt`) — `dub test` will fail
+loudly if any `MIR_op_t`/enum value drifts.
 
 ## License
 

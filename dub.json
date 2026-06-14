@@ -7,8 +7,23 @@
 	"targetType": "library",
 	"sourcePaths": ["source"],
 	"importPaths": ["source"],
-	"preGenerateCommands": ["$PACKAGE_DIR/scripts/build-mir.sh"],
-	"lflags": ["$PACKAGE_DIR/.mir-build/mir.o", "$PACKAGE_DIR/.mir-build/mir-gen.o"],
+	"configurations": [
+		{
+			"name": "bundled",
+			"comment": "Default: compile the vendored MIR C sources (c/mir) with cc and link the objects. No network, no system install.",
+			"preGenerateCommands": [
+				"mkdir -p $PACKAGE_DIR/.mir-build",
+				"test -f $PACKAGE_DIR/.mir-build/mir.o || cc -c -O2 -I$PACKAGE_DIR/c/mir $PACKAGE_DIR/c/mir/mir.c -o $PACKAGE_DIR/.mir-build/mir.o",
+				"test -f $PACKAGE_DIR/.mir-build/mir-gen.o || cc -c -O2 -I$PACKAGE_DIR/c/mir $PACKAGE_DIR/c/mir/mir-gen.c -o $PACKAGE_DIR/.mir-build/mir-gen.o"
+			],
+			"lflags": ["$PACKAGE_DIR/.mir-build/mir.o", "$PACKAGE_DIR/.mir-build/mir-gen.o"]
+		},
+		{
+			"name": "system",
+			"comment": "Link a system-installed MIR (libmir) instead of building the vendored sources.",
+			"lflags": ["-lmir"]
+		}
+	],
 	"subPackages": [
 		{
 			"name": "sum",

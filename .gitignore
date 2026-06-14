@@ -1,5 +1,4 @@
 .dub/
-.mir/
 .mir-build/
 *.o
 *.a
