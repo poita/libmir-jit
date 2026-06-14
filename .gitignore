@@ -8,3 +8,6 @@ __test__*__
 docs/
 libmir-jit-test-*
 *-test-library
+*.lst
+lcov.info
+mirjit-sum-example

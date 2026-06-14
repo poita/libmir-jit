@@ -1,11 +1,21 @@
 {
 	"name": "libmir-jit",
 	"description": "Complete D bindings to MIR (vnmakarov/mir), a lightweight JIT compiler with a built-in optimizer",
+	"homepage": "https://github.com/Poita/libmir-jit",
 	"license": "MIT",
 	"authors": ["Peter Alexander"],
 	"targetType": "library",
 	"sourcePaths": ["source"],
 	"importPaths": ["source"],
 	"preGenerateCommands": ["$PACKAGE_DIR/scripts/build-mir.sh"],
-	"lflags": ["$PACKAGE_DIR/.mir-build/mir.o", "$PACKAGE_DIR/.mir-build/mir-gen.o"]
+	"lflags": ["$PACKAGE_DIR/.mir-build/mir.o", "$PACKAGE_DIR/.mir-build/mir-gen.o"],
+	"subPackages": [
+		{
+			"name": "sum",
+			"targetType": "executable",
+			"targetName": "mirjit-sum-example",
+			"sourceFiles": ["examples/sum.d"],
+			"dependencies": { "libmir-jit": { "path": "." } }
+		}
+	]
 }

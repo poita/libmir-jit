@@ -1,5 +1,10 @@
 # libmir-jit
 
+[![CI](https://github.com/Poita/libmir-jit/actions/workflows/ci.yml/badge.svg)](https://github.com/Poita/libmir-jit/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Poita/libmir-jit/branch/master/graph/badge.svg)](https://codecov.io/gh/Poita/libmir-jit)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![API docs](https://img.shields.io/badge/docs-API%20reference-blue.svg)](https://poita.github.io/libmir-jit/)
+
 Complete D bindings to [MIR](https://github.com/vnmakarov/mir) — Vladimir
 Makarov's lightweight JIT compiler and C11 JIT, built around a medium-level IR
 ("MIR") with a small but real optimizing pipeline (SSA, GVN, DCE, LICM, and a
