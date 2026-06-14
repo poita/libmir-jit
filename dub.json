@@ -1,0 +1,11 @@
+{
+	"name": "libmir-jit",
+	"description": "Complete D bindings to MIR (vnmakarov/mir), a lightweight JIT compiler with a built-in optimizer",
+	"license": "MIT",
+	"authors": ["Peter Alexander"],
+	"targetType": "library",
+	"sourcePaths": ["source"],
+	"importPaths": ["source"],
+	"preGenerateCommands": ["$PACKAGE_DIR/scripts/build-mir.sh"],
+	"lflags": ["$PACKAGE_DIR/.mir-build/mir.o", "$PACKAGE_DIR/.mir-build/mir-gen.o"]
+}

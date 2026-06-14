@@ -1,0 +1,8 @@
+.dub/
+.mir/
+.mir-build/
+*.o
+*.a
+libmir-jit
+__test__*__
+docs/
