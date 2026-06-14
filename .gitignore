@@ -6,3 +6,5 @@
 libmir-jit
 __test__*__
 docs/
+libmir-jit-test-*
+*-test-library
