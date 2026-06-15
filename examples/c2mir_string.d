@@ -1,63 +1,41 @@
 /**
- * Example: compile a C source STRING to native code at runtime with c2mir,
- * then call it — all in-process, no subprocess or temp files.
+ * Example: the idiomatic `CJit` interface — compile C source strings to native
+ * code at runtime and call them, including compiled C that calls back into the
+ * host (here, libc's printf via host-symbol resolution).
  *
- * Requires the with-c2mir configuration (links c2mir.o):
  *     dub run :cstr
  */
 module example.c2mir_string;
 
 import std.stdio;
-import mirjit;
-
-// c2mir reads source through a char-at-a-time callback; this one reads a string.
-struct StrReader { const(char)[] s; size_t pos; }
-extern (C) int strGetc(void* p) nothrow @nogc
-{
-    auto r = cast(StrReader*) p;
-    return r.pos < r.s.length ? cast(int) cast(ubyte) r.s[r.pos++] : -1; // -1 = EOF
-}
-
-/// Compile a single C function from `src` and JIT it to a callable `Fn`.
-Fn compileC(Fn)(MIR_context_t ctx, string funcName, string src)
-{
-    auto reader = StrReader(src);
-    c2mir_options opts;                 // zero-initialised
-    opts.message_file = stderr.getFP;   // surface any diagnostics
-
-    if (!c2mir_compile(ctx, &opts, &strGetc, &reader, "inline.c", null))
-        throw new Exception("c2mir failed to compile the source");
-
-    // Load every module c2mir produced into the context.
-    foreach (m; mirModules(ctx))
-        MIR_load_module(ctx, m);
-
-    MIR_gen_init(ctx);
-    MIR_gen_set_optimize_level(ctx, 2);
-    MIR_link(ctx, &MIR_set_gen_interface, null);
-
-    auto item = mirFindFunc(ctx, funcName.toStringz);
-    if (item is null)
-        throw new Exception("function '" ~ funcName ~ "' not found after compile");
-    return cast(Fn) MIR_gen(ctx, item);
-}
-
-import std.string : toStringz;
+import mirjit;          // raw bindings
+import mirjit.cjit;     // idiomatic wrapper (active under with-c2mir)
 
 void main()
 {
-    auto ctx = MIR_init();
-    scope (exit) MIR_finish(ctx);
-    c2mir_init(ctx);
-    scope (exit) c2mir_finish(ctx);
+    auto jit = CJit.create();              // RAII: tears down MIR/c2mir on scope exit
 
-    // A C function built (and optimised) entirely at runtime.
+    // 1) compile a function from a string and call it as a typed delegate.
     alias AddFn = extern (C) int function(int, int) nothrow @nogc;
-    auto add = compileC!AddFn(ctx, "add",
-        "int add(int a, int b) { return a + b; }\n");
-
-    writefln("add(2, 3)   = %s (want 5)", add(2, 3));
-    writefln("add(40, 2)  = %s (want 42)", add(40, 2));
+    auto add = jit.compileFunction!AddFn("add",
+        "int add(int a, int b) { return a + b; }");
+    writefln("add(2, 3)  = %s (want 5)", add(2, 3));
+    writefln("add(40, 2) = %s (want 42)", add(40, 2));
     assert(add(2, 3) == 5 && add(40, 2) == 42);
+
+    // 2) compiled C calling back into the host (printf resolved automatically).
+    alias GreetFn = extern (C) void function() nothrow @nogc;
+    auto greet = jit.compileFunction!GreetFn("greet", `
+        extern int printf(const char *, ...);
+        void greet(void) { printf("  hello from JIT-compiled C!\n"); }
+    `);
+    greet();
+
+    // 3) compile errors surface as exceptions with the compiler's diagnostics.
+    try
+        jit.compile("int oops(void) { return nope; }");
+    catch (CJitException e)
+        writefln("caught expected compile error: %s", e.msg.length ? "yes" : "no");
+
     writeln("OK");
 }
