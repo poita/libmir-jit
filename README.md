@@ -84,50 +84,34 @@ A full, runnable version is in [`examples/sum.d`](examples/sum.d).
 ## Compiling C at runtime (c2mir)
 
 c2mir is a full C11 compiler that runs in-process: feed it C source and it emits
-MIR, which is then JIT-compiled to native code. This needs the `with-c2mir`
+MIR, which you then JIT exactly like hand-built IR. Build with the `with-c2mir`
 configuration (it additionally compiles `c/mir/c2mir`):
 
 ```sh
-dub run :cstr                       # runnable example
+dub run :cstr                       # runnable example: compiles a C string, calls it
 dub build --config=with-c2mir       # to depend on it from your own project
 ```
 
-### Idiomatic interface — `mirjit.cjit.CJit`
-
-The high-level wrapper handles lifetimes (RAII), turns compiler errors into
-exceptions, returns typed function pointers, and resolves host symbols so
-compiled C can call back into your program:
+The input arrives through a char-reader callback, so the source can be a string,
+file, or stream. After `c2mir_compile`, walk the modules it created, load+link
+them, and JIT the function:
 
 ```d
-import mirjit.cjit;
+c2mir_init(ctx);
+auto reader = StrReader("int add(int a, int b){ return a+b; }");
+c2mir_options opts; opts.message_file = stderr.getFP;
+c2mir_compile(ctx, &opts, &strGetc, &reader, "inline.c", null);
 
-auto jit = CJit.create();                    // frees MIR/c2mir on scope exit
-
-alias AddFn = extern (C) int function(int, int) nothrow @nogc;
-auto add = jit.compileFunction!AddFn("add", "int add(int a, int b){ return a+b; }");
-assert(add(2, 3) == 5);
-
-// compiled C can call host symbols (libc, your extern(C) functions) directly:
-auto greet = jit.compileFunction!(extern(C) void function())("greet",
-    `extern int printf(const char*, ...); void greet(void){ printf("hi\n"); }`);
-greet();
-
-try jit.compile("int bad(){ return undefined_thing; }");
-catch (CJitException e) { /* e.msg carries c2mir's diagnostics */ }
+foreach (m; mirModules(ctx)) MIR_load_module(ctx, m);
+MIR_gen_init(ctx);
+MIR_link(ctx, &MIR_set_gen_interface, null);
+auto add = cast(int function(int,int)) MIR_gen(ctx, mirFindFunc(ctx, "add"));
 ```
 
-`CJit.create` takes a `CJitOptions` (optimisation level, `-I` include dirs,
-preprocessor defines, host-symbol resolution). Use `jit.define("name", &fn)` to
-register a specific host symbol explicitly. The compiler is non-copyable and
-owns its MIR context.
-
-### Lower-level helpers
-
-If you want the raw flow, the bindings expose it directly: drive `c2mir_compile`
-with a char-reader callback, then `mirModules(ctx)` to iterate the created
-modules and `mirFindFunc(ctx, "name")` to locate a compiled function (MIR's
+See [`examples/c2mir_string.d`](examples/c2mir_string.d). Two helpers make this
+ergonomic: `mirModules(ctx)` iterates the context's modules, and
+`mirFindFunc(ctx, "name")` locates a compiled function (MIR's
 `MIR_get_global_item` is declared in the header but not implemented upstream).
-See [`examples/c2mir_string.d`](examples/c2mir_string.d).
 
 ## Build & test
 
