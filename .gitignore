@@ -10,3 +10,4 @@ libmir-jit-test-*
 *.lst
 lcov.info
 mirjit-sum-example
+mirjit-c2mir-example

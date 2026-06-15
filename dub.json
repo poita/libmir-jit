@@ -10,13 +10,24 @@
 	"configurations": [
 		{
 			"name": "bundled",
-			"comment": "Default: compile the vendored MIR C sources (c/mir) with cc and link the objects. No network, no system install.",
+			"comment": "Default: compile vendored MIR core+JIT (c/mir) with cc and link the objects.",
 			"preGenerateCommands": [
 				"mkdir -p $PACKAGE_DIR/.mir-build",
 				"test -f $PACKAGE_DIR/.mir-build/mir.o || cc -c -O2 -I$PACKAGE_DIR/c/mir $PACKAGE_DIR/c/mir/mir.c -o $PACKAGE_DIR/.mir-build/mir.o",
 				"test -f $PACKAGE_DIR/.mir-build/mir-gen.o || cc -c -O2 -I$PACKAGE_DIR/c/mir $PACKAGE_DIR/c/mir/mir-gen.c -o $PACKAGE_DIR/.mir-build/mir-gen.o"
 			],
 			"lflags": ["$PACKAGE_DIR/.mir-build/mir.o", "$PACKAGE_DIR/.mir-build/mir-gen.o"]
+		},
+		{
+			"name": "with-c2mir",
+			"comment": "Bundled MIR plus the c2mir C11->MIR frontend (compiles c/mir/c2mir).",
+			"preGenerateCommands": [
+				"mkdir -p $PACKAGE_DIR/.mir-build",
+				"test -f $PACKAGE_DIR/.mir-build/mir.o || cc -c -O2 -I$PACKAGE_DIR/c/mir $PACKAGE_DIR/c/mir/mir.c -o $PACKAGE_DIR/.mir-build/mir.o",
+				"test -f $PACKAGE_DIR/.mir-build/mir-gen.o || cc -c -O2 -I$PACKAGE_DIR/c/mir $PACKAGE_DIR/c/mir/mir-gen.c -o $PACKAGE_DIR/.mir-build/mir-gen.o",
+				"test -f $PACKAGE_DIR/.mir-build/c2mir.o || cc -c -O2 -I$PACKAGE_DIR/c/mir -I$PACKAGE_DIR/c/mir/c2mir $PACKAGE_DIR/c/mir/c2mir/c2mir.c -o $PACKAGE_DIR/.mir-build/c2mir.o"
+			],
+			"lflags": ["$PACKAGE_DIR/.mir-build/mir.o", "$PACKAGE_DIR/.mir-build/mir-gen.o", "$PACKAGE_DIR/.mir-build/c2mir.o", "-lm"]
 		},
 		{
 			"name": "system",
@@ -31,6 +42,14 @@
 			"targetName": "mirjit-sum-example",
 			"sourceFiles": ["examples/sum.d"],
 			"dependencies": { "libmir-jit": { "path": "." } }
+		},
+		{
+			"name": "cstr",
+			"targetType": "executable",
+			"targetName": "mirjit-c2mir-example",
+			"sourceFiles": ["examples/c2mir_string.d"],
+			"dependencies": { "libmir-jit": { "path": "." } },
+			"subConfigurations": { "libmir-jit": "with-c2mir" }
 		}
 	]
 }

@@ -26,7 +26,7 @@ void MIR_finish(MIR_context_t ctx);
 
 // ---- modules & items ----
 MIR_module_t MIR_new_module(MIR_context_t ctx, const(char)* name);
-DLIST_MIR_module_t* MIR_get_module_list(MIR_context_t ctx);
+MIR_module_list* MIR_get_module_list(MIR_context_t ctx);
 MIR_item_t MIR_new_import(MIR_context_t ctx, const(char)* name);
 MIR_item_t MIR_new_export(MIR_context_t ctx, const(char)* name);
 MIR_item_t MIR_new_forward(MIR_context_t ctx, const(char)* name);
@@ -223,3 +223,30 @@ MIR_context_t MIR_init2(MIR_alloc_t alloc, MIR_code_alloc_t code_alloc) nothrow 
 
 /// Create a context with default allocators.
 MIR_context_t MIR_init() nothrow @nogc { return MIR_init2(null, null); }
+
+/// Iterate the modules currently in `ctx` (e.g. those created by
+/// c2mir_compile). Newest modules are at the tail.
+auto mirModules(MIR_context_t ctx) nothrow @nogc
+{
+    static struct Range
+    {
+        MIR_module_t cur;
+        bool empty() nothrow @nogc { return cur is null; }
+        MIR_module_t front() nothrow @nogc { return cur; }
+        void popFront() nothrow @nogc { cur = cur.module_next; }
+    }
+    auto list = MIR_get_module_list(ctx);
+    return Range(list is null ? null : list.head);
+}
+
+/// Find a function item by name across all loaded modules in `ctx`. Use this
+/// instead of MIR_get_global_item (declared in mir.h but not implemented).
+MIR_item_t mirFindFunc(MIR_context_t ctx, const(char)* name) nothrow @nogc
+{
+    import core.stdc.string : strcmp;
+    foreach (m; mirModules(ctx))
+        for (MIR_item_t it = m.items_head; it !is null; it = it.item_link_next)
+            if (it.item_type == MIR_func_item && strcmp(MIR_item_name(ctx, it), name) == 0)
+                return it;
+    return null;
+}

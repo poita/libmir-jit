@@ -24,8 +24,22 @@ alias htab_hash_t = uint;
 
 // ---- opaque handles (used only via these pointers) ----
 struct MIR_context;     alias MIR_context_t    = MIR_context*;
-struct MIR_module;      alias MIR_module_t     = MIR_module*;
-struct MIR_item;        alias MIR_item_t       = MIR_item*;
+struct MIR_item            // concrete: layout verified by unittest
+{
+    void* data;
+    MIR_module_t mod;            /// owning module (C field 'module')
+    MIR_item_t item_link_prev;   /// DLIST_LINK(MIR_item_t).prev
+    MIR_item_t item_link_next;   ///                       .next
+    MIR_item_type_t item_type;
+    uint _pad0;
+    MIR_item_t ref_def;
+    void* addr;                  /// callable address after gen+link
+    char export_p;
+    char section_head_p;
+    char[6] _pad1;
+    void* u;                     /// union {MIR_func_t func; ...} — treated opaquely
+}
+alias MIR_item_t = MIR_item*;
 struct MIR_insn;        alias MIR_insn_t       = MIR_insn*;
 alias MIR_label_t = MIR_insn_t;    /// a label is an insn
 struct MIR_func;        alias MIR_func_t       = MIR_func*;
@@ -37,7 +51,22 @@ struct MIR_expr_data;   alias MIR_expr_data_t  = MIR_expr_data*;
 struct MIR_bss;         alias MIR_bss_t        = MIR_bss*;
 struct MIR_alloc;       alias MIR_alloc_t      = MIR_alloc*;
 struct MIR_code_alloc;  alias MIR_code_alloc_t = MIR_code_alloc*;
-struct DLIST_MIR_module_t; /// opaque list returned by MIR_get_module_list
+/// MIR_module is a public header struct; we expose its layout (verified by
+/// unittest) so the module list (e.g. modules created by c2mir) can be walked.
+struct MIR_module
+{
+    void* data;
+    const(char)* name;
+    MIR_item_t items_head;     /// DLIST(MIR_item_t).head
+    MIR_item_t items_tail;     ///                  .tail
+    MIR_module* module_prev;   /// DLIST_LINK(MIR_module_t).prev
+    MIR_module* module_next;   ///                         .next
+    uint last_temp_item_num;
+}
+alias MIR_module_t = MIR_module*;
+
+/// DLIST(MIR_module_t) returned by MIR_get_module_list.
+struct MIR_module_list { MIR_module_t head; MIR_module_t tail; }
 
 /// Error handler: void (MIR_error_type_t, const char *fmt, ...).
 alias MIR_error_func_t = extern (C) void function(MIR_error_type_t, const(char)*, ...) nothrow;
@@ -458,4 +487,8 @@ unittest
     static assert(MIR_reg_t.sizeof == 4 && MIR_disp_t.sizeof == 8);
     static assert(MIR_T_I64 == 6 && MIR_T_P == 11 && MIR_T_RBLK == 17);
     static assert(MIR_MOV == 0 && MIR_ADD == 34 && MIR_BGE == 154 && MIR_RET == 171);
+    static assert(MIR_module.sizeof == 56, "MIR_module must be 56 bytes");
+    static assert(MIR_module.module_next.offsetof == 40, "module_next at offset 40");
+    static assert(MIR_item.sizeof == 72, "MIR_item must be 72 bytes");
+    static assert(MIR_item.item_link_next.offsetof == 24 && MIR_item.item_type.offsetof == 32);
 }

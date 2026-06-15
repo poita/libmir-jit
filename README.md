@@ -28,8 +28,8 @@ These are raw, 1:1 `extern(C)` bindings (no opinionated wrapper):
   with `MIR_init` / `MIR_init2` reimplemented as D functions (the header
   versions are `static inline`).
 - `mirjit.gen` — the JIT generator (`mir-gen.h`).
-- `mirjit.c2mir` — the C11→MIR frontend (`c2mir/c2mir.h`); links only when MIR
-  is built with c2mir.
+- `mirjit.c2mir` — the C11->MIR frontend (`c2mir/c2mir.h`); usable via the
+  `with-c2mir` configuration (see below).
 
 Container structs (`MIR_func`, `MIR_item`, `MIR_module`, `MIR_insn`, …) are
 opaque handles — the public API hands them back as pointers and provides
@@ -50,6 +50,7 @@ for linking a preinstalled `libmir` instead:
 ```sh
 dub build                      # bundled (default): compiles vendored MIR
 dub build --config=system      # link -lmir from the system instead
+dub build --config=with-c2mir  # bundled MIR + the c2mir C frontend
 ```
 
 ## Usage
@@ -79,6 +80,38 @@ MIR_gen_finish(ctx);
 ```
 
 A full, runnable version is in [`examples/sum.d`](examples/sum.d).
+
+## Compiling C at runtime (c2mir)
+
+c2mir is a full C11 compiler that runs in-process: feed it C source and it emits
+MIR, which you then JIT exactly like hand-built IR. Build with the `with-c2mir`
+configuration (it additionally compiles `c/mir/c2mir`):
+
+```sh
+dub run :cstr                       # runnable example: compiles a C string, calls it
+dub build --config=with-c2mir       # to depend on it from your own project
+```
+
+The input arrives through a char-reader callback, so the source can be a string,
+file, or stream. After `c2mir_compile`, walk the modules it created, load+link
+them, and JIT the function:
+
+```d
+c2mir_init(ctx);
+auto reader = StrReader("int add(int a, int b){ return a+b; }");
+c2mir_options opts; opts.message_file = stderr.getFP;
+c2mir_compile(ctx, &opts, &strGetc, &reader, "inline.c", null);
+
+foreach (m; mirModules(ctx)) MIR_load_module(ctx, m);
+MIR_gen_init(ctx);
+MIR_link(ctx, &MIR_set_gen_interface, null);
+auto add = cast(int function(int,int)) MIR_gen(ctx, mirFindFunc(ctx, "add"));
+```
+
+See [`examples/c2mir_string.d`](examples/c2mir_string.d). Two helpers make this
+ergonomic: `mirModules(ctx)` iterates the context's modules, and
+`mirFindFunc(ctx, "name")` locates a compiled function (MIR's
+`MIR_get_global_item` is declared in the header but not implemented upstream).
 
 ## Build & test
 
