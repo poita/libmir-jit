@@ -28,11 +28,17 @@ jobs:
       - name: Unit tests
         run: dub test
 
+      - name: Unit tests (c2mir layer)
+        run: dub test -c with-c2mir
+
       - name: Build & run example (end-to-end JIT)
         run: dub run :sum
 
       - name: c2mir example (compile a C string at runtime)
         run: dub run :cstr
+
+      - name: idiomatic c2mir example (jit / CModule.get)
+        run: dub run :cc
 
   coverage:
     name: coverage to Codecov
@@ -45,7 +51,7 @@ jobs:
           compiler: ldc-latest
 
       - name: Test with coverage
-        run: dub test --coverage
+        run: dub test -c with-c2mir --coverage
 
       - name: Convert coverage to lcov
         run: bash scripts/cov-to-lcov.sh lcov.info

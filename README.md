@@ -17,7 +17,8 @@ Silicon)**, ppc64le, s390x, and riscv64.
 
 ## What's covered
 
-These are raw, 1:1 `extern(C)` bindings (no opinionated wrapper):
+These are raw, 1:1 `extern(C)` bindings, plus a small idiomatic layer over
+c2mir (`mirjit.cjit`):
 
 - `mirjit.types` — all scalar typedefs, the five enums (`MIR_insn_code_t` and
   friends, values generated from the configured header and asserted in
@@ -29,6 +30,9 @@ These are raw, 1:1 `extern(C)` bindings (no opinionated wrapper):
   versions are `static inline`).
 - `mirjit.gen` — the JIT generator (`mir-gen.h`).
 - `mirjit.c2mir` — the C11->MIR frontend (`c2mir/c2mir.h`); usable via the
+  `with-c2mir` configuration (see below).
+- `mirjit.cjit` — an idiomatic D layer over c2mir (`jit` / `CModule.get`) for
+  compiling a C string and pulling out typed function pointers; built with the
   `with-c2mir` configuration (see below).
 
 Container structs (`MIR_func`, `MIR_item`, `MIR_module`, `MIR_insn`, …) are
@@ -112,6 +116,48 @@ See [`examples/c2mir_string.d`](examples/c2mir_string.d). Two helpers make this
 ergonomic: `mirModules(ctx)` iterates the context's modules, and
 `mirFindFunc(ctx, "name")` locates a compiled function (MIR's
 `MIR_get_global_item` is declared in the header but not implemented upstream).
+
+### Idiomatic layer: `jit` and `CModule`
+
+For the common case — compile a C string, pull out typed functions, call them —
+`mirjit.cjit` wraps all of the above. Compile once with `jit`, then ask for
+functions by name and D signature with `CModule.get`:
+
+```d
+import mirjit;
+
+auto m = jit(`
+    int    add(int a, int b) { return a + b; }
+    double scale(double x)   { return x * 2.5; }
+`);
+
+auto add   = m.get!(int, int, int)("add");   // extern(C) int function(int, int)
+auto scale = m.get!(double, double)("scale");
+assert(add(2, 3) == 5);
+assert(scale(4.0) == 10.0);
+```
+
+The first template argument is the return type; the rest are parameter types.
+`get!(Ret, void)` (or `get!(Ret)`) is a zero-parameter function. Only
+C-compatible scalar and pointer types are accepted — anything else is a
+compile-time error.
+
+- **Owns the code.** `CModule` holds the MIR context and frees it (and all
+  generated code) in its destructor. It is non-copyable, and the returned
+  function pointers are valid only while it is alive — same contract as a
+  `dlopen` handle.
+- **Lazy, cached codegen.** `jit` compiles the C up front (syntax errors throw
+  `CompileException` with diagnostics); each `get` JITs its function on first
+  use and caches the result.
+- **Runtime signature check.** A wrong return/parameter type or arity throws
+  `SignatureException` (rendering both signatures) instead of crashing at the
+  call. Missing names throw `SymbolException`.
+- **Host symbols.** By default unresolved C symbols (e.g. `sqrt`, `malloc`)
+  resolve via `dlsym(RTLD_DEFAULT)`; set `COptions.resolveHostSymbols = false`
+  to disable. `COptions` also carries `optimize`, `debugInfo`, `includeDirs`,
+  and `defines`.
+
+Runnable example: [`examples/cc_jit.d`](examples/cc_jit.d) (`dub run :cc`).
 
 ## Build & test
 

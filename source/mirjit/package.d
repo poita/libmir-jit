@@ -15,3 +15,4 @@ public import mirjit.types;
 public import mirjit.core;
 public import mirjit.gen;
 public import mirjit.c2mir;
+public import mirjit.cjit;
