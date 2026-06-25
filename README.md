@@ -15,6 +15,23 @@ Silicon)**, ppc64le, s390x, and riscv64.
 > numerics** ecosystem. This is a binding to *vnmakarov/mir*, the JIT — hence
 > the distinct name `libmir-jit` and the `mirjit` module namespace.
 
+## A taste
+
+Compile C at runtime and call it as a native D function:
+
+```d
+import mirjit;
+
+auto m = jit(`int add(int a, int b) { return a + b; }`);
+auto add = m.get!(int function(int, int))("add");
+assert(add(2, 3) == 5);
+```
+
+That's the whole loop: hand `jit` a C string, ask for a function by its
+type and name, call it at native speed. Wrong signature or missing name throws
+rather than crashes. (Uses the `with-c2mir` configuration — see below.) Prefer
+to drive the raw IR yourself? Jump to [Usage](#usage).
+
 ## What's covered
 
 These are raw, 1:1 `extern(C)` bindings, plus a small idiomatic layer over
@@ -121,7 +138,7 @@ ergonomic: `mirModules(ctx)` iterates the context's modules, and
 
 For the common case — compile a C string, pull out typed functions, call them —
 `mirjit.cjit` wraps all of the above. Compile once with `jit`, then ask for
-functions by name and D signature with `CModule.get`:
+functions by type and name with `CModule.get`:
 
 ```d
 import mirjit;
@@ -131,14 +148,16 @@ auto m = jit(`
     double scale(double x)   { return x * 2.5; }
 `);
 
-auto add   = m.get!(int, int, int)("add");   // extern(C) int function(int, int)
-auto scale = m.get!(double, double)("scale");
+auto add   = m.get!(int function(int, int))("add");
+auto scale = m.get!(double function(double))("scale");
 assert(add(2, 3) == 5);
 assert(scale(4.0) == 10.0);
 ```
 
-The first template argument is the return type; the rest are parameter types.
-`get!(Ret, void)` (or `get!(Ret)`) is a zero-parameter function. Only
+`get` takes the function-pointer type you want — written inline as above, or a
+named `alias Fn = int function(int, int); m.get!Fn("add")`. The linkage and
+attributes are normalized, so the result is always `extern(C) ... nothrow
+@nogc`; a zero-parameter function is just `get!(int function())`. Only
 C-compatible scalar and pointer types are accepted — anything else is a
 compile-time error.
 

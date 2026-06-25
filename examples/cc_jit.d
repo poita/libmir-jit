@@ -22,10 +22,10 @@ void main()
         const char* greet(void)    { return "hello from C"; }
     `);
 
-    auto add   = m.get!(int, int, int)("add");
-    auto scale = m.get!(double, double)("scale");
-    auto sumto = m.get!(long, long)("sumto");
-    auto greet = m.get!(const(char)*, void)("greet");
+    auto add   = m.get!(int function(int, int))("add");
+    auto scale = m.get!(double function(double))("scale");
+    auto sumto = m.get!(long function(long))("sumto");
+    auto greet = m.get!(const(char)* function())("greet");
 
     writefln("add(2, 3)    = %s", add(2, 3));
     writefln("scale(4.0)   = %s", scale(4.0));

@@ -6,14 +6,14 @@
  *
  * ---
  * auto m   = jit("int add(int a, int b) { return a + b; }");
- * auto add = m.get!(int, int, int)("add");   // extern(C) int function(int, int)
+ * auto add = m.get!(int function(int, int))("add");
  * assert(add(2, 3) == 5);
  * ---
  *
- * The first template argument to `get` is the return type; the rest are the
- * parameter types. `get!(Ret, void)` (or `get!(Ret)`) denotes a zero-parameter
- * function. Only C-compatible scalar and pointer types are accepted; anything
- * else is a compile-time error.
+ * `get` takes the function-pointer type you want to retrieve, e.g.
+ * `int function(int, int)` or a named `alias`. Whatever linkage and attributes
+ * it carries are normalized to `extern(C) ... nothrow @nogc`. Only C-compatible
+ * scalar and pointer types are accepted; anything else is a compile-time error.
  *
  * `CModule` owns the MIR context and all generated code: the returned function
  * pointers are valid only while the `CModule` is alive (same contract as a
@@ -31,7 +31,7 @@ import mirjit.core;
 import mirjit.gen;
 import mirjit.c2mir;
 
-import std.meta : AliasSeq;
+import std.traits : ReturnType, Parameters, isFunctionPointer;
 import std.string : toStringz;
 import core.stdc.stdio : FILE, fclose;
 import core.stdc.stdlib : free;
@@ -112,20 +112,23 @@ struct CModule
 
     /**
      * Generate (lazily, then cache) the named C function and return it as a
-     * typed `extern(C)` function pointer. `Ret` is the return type; `Args` are
-     * the parameter types. `get!(Ret, void)` and `get!(Ret)` both mean no
-     * parameters.
+     * typed function pointer. `Fn` is the function-pointer type to retrieve,
+     * e.g. `int function(int, int)`; its linkage and attributes are normalized,
+     * so the returned pointer is always `extern(C) ... nothrow @nogc`. A
+     * zero-parameter function is just `get!(int function())`.
      *
      * Throws: `SymbolException` if no such function;
      *         `SignatureException` if the prototype is incompatible.
      */
-    auto get(Ret, Args...)(string name)
+    auto get(Fn)(string name)
     {
-        static if (Args.length == 1 && is(Args[0] == void))
-            alias Params = AliasSeq!();
-        else
-            alias Params = Args;
-        alias Fn = extern (C) Ret function(Params) nothrow @nogc;
+        static assert(isFunctionPointer!Fn,
+            "mirjit: get!(F) expects a function-pointer type like "
+            ~ "`int function(int, int)`, not " ~ Fn.stringof);
+
+        alias Ret = ReturnType!Fn;
+        alias Params = Parameters!Fn;
+        alias NormFn = extern (C) Ret function(Params) nothrow @nogc;
 
         enum size_t wantNargs = Params.length;
         enum size_t wantNres = is(Ret == void) ? 0 : 1;
@@ -149,7 +152,7 @@ struct CModule
             if (!typeCompatible(mirType!P, fv.vars.varr[i].type))
                 throw sigMismatch!(Ret, Params)(name, fv);
 
-        return cast(Fn) addr;
+        return cast(NormFn) addr;
     }
 
     private void* genFor(MIR_item_t item, string name)
@@ -371,16 +374,35 @@ version (unittest)
 unittest // basic: compile and call a scalar function
 {
     auto m = jit("int add(int a, int b) { return a + b; }");
-    auto add = m.get!(int, int, int)("add");
+    auto add = m.get!(int function(int, int))("add");
     assert(add(2, 3) == 5);
     assert(add(40, 2) == 42);
+}
+
+unittest // get accepts a named function-pointer alias
+{
+    alias AddFn = int function(int, int);
+    auto m = jit("int add(int a, int b){return a+b;}");
+    auto add = m.get!AddFn("add");
+    assert(add(7, 8) == 15);
+}
+
+unittest // the requested type's linkage/attributes are normalized
+{
+    // A plain (extern(D), throwing) function-pointer type is accepted; the
+    // returned pointer is always extern(C) nothrow @nogc.
+    auto m = jit("int id(int x){return x;}");
+    auto id = m.get!(int function(int))("id");
+    alias Want = extern (C) int function(int) nothrow @nogc;
+    static assert(is(typeof(id) == Want));
+    assert(id(99) == 99);
 }
 
 unittest // pull multiple functions out of one module
 {
     auto m = jit("int add(int a, int b){return a+b;} int sub(int a, int b){return a-b;}");
-    auto add = m.get!(int, int, int)("add");
-    auto sub = m.get!(int, int, int)("sub");
+    auto add = m.get!(int function(int, int))("add");
+    auto sub = m.get!(int function(int, int))("sub");
     assert(add(10, 4) == 14);
     assert(sub(10, 4) == 6);
 }
@@ -390,28 +412,28 @@ unittest // void return and a zero-parameter function via get!(Ret, void)
     __gshared int hits;
     // a pointer return, no args
     auto m = jit(`const char* greet(void) { return "hi"; }`);
-    auto greet = m.get!(const(char)*, void)("greet");
+    auto greet = m.get!(const(char)* function())("greet");
     assert(strcmp(greet(), "hi") == 0);
 }
 
 unittest // get!(Ret) with no Args also means zero parameters
 {
     auto m = jit("int answer(void) { return 42; }");
-    auto answer = m.get!(int)("answer");
+    auto answer = m.get!(int function())("answer");
     assert(answer() == 42);
 }
 
 unittest // floating point
 {
     auto m = jit("double scale(double x) { return x * 2.5; }");
-    auto scale = m.get!(double, double)("scale");
+    auto scale = m.get!(double function(double))("scale");
     assert(scale(4.0) == 10.0);
 }
 
 unittest // pointer argument
 {
     auto m = jit("int firstplus(int* p, int n) { return p[0] + n; }");
-    auto f = m.get!(int, int*, int)("firstplus");
+    auto f = m.get!(int function(int*, int))("firstplus");
     int[3] xs = [7, 8, 9];
     assert(f(xs.ptr, 100) == 107);
 }
@@ -430,35 +452,35 @@ unittest // has() and functions()
 unittest // lazy gen is cached: same name yields the same address
 {
     auto m = jit("int id(int x){return x;}");
-    auto a = m.get!(int, int)("id");
-    auto b = m.get!(int, int)("id");
+    auto a = m.get!(int function(int))("id");
+    auto b = m.get!(int function(int))("id");
     assert(a is b);
 }
 
 unittest // unknown function name throws SymbolException
 {
     auto m = jit("int present(void){return 0;}");
-    assertThrown!SymbolException(m.get!(int)("absent"));
+    assertThrown!SymbolException(m.get!(int function())("absent"));
 }
 
 unittest // wrong arity throws SignatureException
 {
     auto m = jit("int add(int a, int b){return a+b;}");
-    assertThrown!SignatureException(m.get!(int, int)("add"));
+    assertThrown!SignatureException(m.get!(int function(int))("add"));
 }
 
 unittest // incompatible type class throws SignatureException
 {
     auto m = jit("int id(int x){return x;}");
     // i32 argument requested as a double is not call-compatible
-    assertThrown!SignatureException(m.get!(int, double)("id"));
+    assertThrown!SignatureException(m.get!(int function(double))("id"));
 }
 
 unittest // signedness and int-vs-pointer of equal width are accepted
 {
     auto m = jit("long passthru(char* p){ return (long) p; }");
     // request the pointer parameter as void* and result as ulong: widths match
-    auto f = m.get!(ulong, void*)("passthru");
+    auto f = m.get!(ulong function(void*))("passthru");
     int x;
     assert(f(&x) == cast(ulong) &x);
 }
@@ -473,7 +495,7 @@ unittest // a C compile error throws CompileException with diagnostics
 unittest // host symbol resolution: the C code calls libc/libm sqrt
 {
     auto m = jit("double sqrt(double); double rooted(double x){ return sqrt(x); }");
-    auto rooted = m.get!(double, double)("rooted");
+    auto rooted = m.get!(double function(double))("rooted");
     assert(rooted(16.0) == 4.0);
 }
 
@@ -481,5 +503,5 @@ unittest // optimization level 0 still produces correct code
 {
     COptions o; o.optimize = 0;
     auto m = jit("int twice(int x){return x+x;}", o);
-    assert(m.get!(int, int)("twice")(21) == 42);
+    assert(m.get!(int function(int))("twice")(21) == 42);
 }
