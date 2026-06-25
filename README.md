@@ -164,7 +164,7 @@ Runnable example: [`examples/cc_jit.d`](examples/cc_jit.d) (`dub run :cc`).
 ```sh
 dub build
 dub test          # builds MIR, links it, runs the ABI asserts + a JIT sum test
-dub run :sum      # (if wired as a subpackage) or build examples/sum.d directly
+dub run :sum      # runnable example (also :cstr and :cc)
 ```
 
 Use the array-based constructors (`MIR_new_func_arr`, `MIR_new_insn_arr`) rather
