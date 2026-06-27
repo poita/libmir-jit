@@ -178,6 +178,27 @@ compile-time error.
 
 Runnable example: [`examples/cc_jit.d`](examples/cc_jit.d) (`dub run :cc`).
 
+### Calling back into D
+
+The JIT'd C can call your own `extern(C)` functions. Register them by address
+with `hostFn` and the JIT binds them directly — no dynamic-symbol export needed,
+and they take precedence over the `dlsym` resolver:
+
+```d
+extern (C) int host_add(int a, int b) nothrow { return a + b; }
+
+auto opts = COptions.init.withExternals(hostFn("host_add", &host_add));
+auto m = jit(`int host_add(int, int);              // declare it in C
+              int use(int x) { return host_add(x, 5); }`, opts);
+assert(m.get!(int function(int))("use")(3) == 8);
+```
+
+The C name you bind to (`"host_add"`) is explicit, so it need not match the D
+identifier. Declare the function in the C source yourself, with a prototype that
+matches the D signature — a mismatch is undefined behaviour, just as it would be
+across any C ABI boundary. The callback should be `nothrow`: a D exception
+unwinding through the JIT'd C frames is undefined.
+
 ## Build & test
 
 ```sh

@@ -59,6 +59,25 @@ class SignatureException : Exception
     this(string msg, string file = __FILE__, size_t line = __LINE__) { super(msg, file, line); }
 }
 
+/// A host function made callable from the JIT'd C code: the C-visible `name`
+/// the C source refers to, bound to the `addr` of an `extern(C)` D (or C)
+/// function. Build one with `hostFn`.
+struct HostFn
+{
+    string name;
+    void* addr;
+}
+
+/// Bind a function pointer to the `name` the C source calls it by. The C name
+/// is given explicitly, so it need not match the D function's identifier. The
+/// pointer should be an `extern(C)` function whose prototype matches the `extern`
+/// declaration in the C source; a mismatch is undefined behaviour, exactly as
+/// when calling it from C.
+HostFn hostFn(F)(string name, F fp) if (isFunctionPointer!F)
+{
+    return HostFn(name, cast(void*) fp);
+}
+
 /// Options controlling a `jit` compilation.
 struct COptions
 {
@@ -66,7 +85,16 @@ struct COptions
     bool debugInfo = false;       /// Pass c2mir's debug flag.
     string[] includeDirs;         /// Header search paths (-I).
     string[2][] defines;          /// Preprocessor [name, value] pairs (-D); value "" defines it empty.
-    bool resolveHostSymbols = true; /// Resolve unresolved C symbols via dlsym(RTLD_DEFAULT).
+    bool resolveHostSymbols = true; /// Resolve still-unresolved C symbols via dlsym(RTLD_DEFAULT).
+    HostFn[] externals;           /// Host functions registered by address (see `hostFn`); take precedence over `resolveHostSymbols`.
+}
+
+/// Append host functions to a copy of `opts`, for a fluent call style:
+/// `jit(src, opts.withExternals(hostFn("add", &dAdd)))`.
+COptions withExternals(COptions opts, HostFn[] fns...)
+{
+    opts.externals ~= fns;
+    return opts;
 }
 
 /**
@@ -232,6 +260,11 @@ private void compileInto(ref CModule m, string source, COptions opts)
     foreach (mod; mirModules(ctx))
         MIR_load_module(ctx, mod);
 
+    // Bind explicit host functions by address before linking. These win over
+    // the dlsym resolver, so they work even with resolveHostSymbols disabled.
+    foreach (e; opts.externals)
+        MIR_load_external(ctx, e.name.toStringz, e.addr);
+
     MIR_gen_init(ctx);
     m.genInited = true;
     MIR_gen_set_optimize_level(ctx, opts.optimize);
@@ -369,6 +402,11 @@ version (unittest)
 {
     import std.exception : assertThrown, collectException;
     import core.stdc.string : strcmp;
+
+    // Host functions the JIT'd C calls back into. The +1000 / *7 make a result
+    // that could only have come from these, not from the C code alone.
+    extern (C) int testHostAdd(int a, int b) nothrow @nogc { return a + b + 1000; }
+    extern (C) int testHostMul(int x) nothrow @nogc { return x * 7; }
 }
 
 unittest // basic: compile and call a scalar function
@@ -377,6 +415,25 @@ unittest // basic: compile and call a scalar function
     auto add = m.get!(int function(int, int))("add");
     assert(add(2, 3) == 5);
     assert(add(40, 2) == 42);
+}
+
+unittest // JIT'd C calls back into an extern(C) D function via opts.externals
+{
+    COptions opts;
+    // The C name "host_add" need not match the D identifier "testHostAdd".
+    opts.externals = [hostFn("host_add", &testHostAdd)];
+    auto m = jit("int host_add(int, int); int use(int x){ return host_add(x, 5); }", opts);
+    auto use = m.get!(int function(int))("use");
+    assert(use(3) == 1008); // testHostAdd(3, 5) == 3 + 5 + 1000
+}
+
+unittest // explicit externals resolve even with dlsym resolution disabled
+{
+    COptions opts;
+    opts.resolveHostSymbols = false;
+    opts = opts.withExternals(hostFn("hmul", &testHostMul));
+    auto m = jit("int hmul(int); int doit(int x){ return hmul(x) + 1; }", opts);
+    assert(m.get!(int function(int))("doit")(6) == 43); // 6 * 7 + 1
 }
 
 unittest // get accepts a named function-pointer alias
