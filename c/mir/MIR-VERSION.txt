@@ -1,13 +1,16 @@
 Vendored snapshot of MIR — https://github.com/vnmakarov/mir
-Upstream commit: 99c65079038f3ba9242ef646f308c266cfd7a8e5
+Upstream commit: dc2c763f1c8bc746102ce87933d866335f9e6c06
 
-Contents: the top-level core/JIT sources only — mir*.c, mir*.h, and
-real-time.h — which is everything mir.c and mir-gen.c need (arch-specific
-.c files are #included conditionally, so all are vendored for portability).
-The c2mir frontend (c2mir/) and tests/benchmarks are intentionally excluded.
+Contents: the top-level core/JIT sources — mir*.c, mir*.h, and real-time.h —
+which is everything mir.c and mir-gen.c need (arch-specific .c files are
+#included conditionally, so all are vendored for portability), plus the c2mir
+C frontend library (c2mir/c2mir.[ch], mirc*.h and the per-arch directories) for
+the with-c2mir configuration. The c2mir driver and tests/benchmarks are
+intentionally excluded.
 
 License: see LICENSE in this directory (MIT, (c) Vladimir Makarov).
 
-To update: copy mir*.c, mir*.h, real-time.h, LICENSE from a newer MIR
-checkout, bump the commit above, and run `dub test` (the ABI static asserts
-fail loudly if any struct size or enum value drifts).
+To update: copy the files above and LICENSE from a newer MIR checkout, bump
+the commit above, then run `python3 scripts/check-enums.py` (compares every
+enum value in source/mirjit/types.d with mir.h) and `dub test` (the ABI static
+asserts fail loudly if a struct size drifts, and the tests JIT real code).

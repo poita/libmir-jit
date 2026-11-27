@@ -23,6 +23,9 @@ jobs:
         with:
           compiler: ${{ matrix.dc }}
 
+      - name: Enum values match the vendored mir.h
+        run: python3 scripts/check-enums.py
+
       # preGenerateCommands fetches a pinned MIR and compiles it with cc; the
       # unit tests then JIT a function and assert ABI struct sizes / enum values.
       - name: Unit tests

@@ -348,9 +348,7 @@ typedef struct {
 #error "undefined or unsupported generation target for C"
 #endif
 
-static inline MIR_alloc_t c2m_alloc (c2m_ctx_t c2m_ctx) {
-  return MIR_get_alloc (c2m_ctx->ctx);
-}
+static inline MIR_alloc_t c2m_alloc (c2m_ctx_t c2m_ctx) { return MIR_get_alloc (c2m_ctx->ctx); }
 
 static void *reg_malloc (c2m_ctx_t c2m_ctx, size_t s) {
   MIR_alloc_t alloc = c2m_alloc (c2m_ctx);
@@ -940,7 +938,8 @@ static void finish_streams (c2m_ctx_t c2m_ctx) {
   VARR_DESTROY (stream_t, streams);
 }
 
-static stream_t new_stream (MIR_alloc_t alloc, FILE *f, const char *fname, int (*getc_func) (c2m_ctx_t)) {
+static stream_t new_stream (MIR_alloc_t alloc, FILE *f, const char *fname,
+                            int (*getc_func) (c2m_ctx_t)) {
   stream_t s = MIR_malloc (alloc, sizeof (struct stream));
 
   VARR_CREATE (char, s->ln, alloc, 128);
@@ -969,7 +968,7 @@ static void add_stream (c2m_ctx_t c2m_ctx, FILE *f, const char *fname,
 
 static int str_getc (c2m_ctx_t c2m_ctx) {
   if (*cs->curr == '\0') return EOF;
-  return *cs->curr++;
+  return (unsigned char) *cs->curr++;
 }
 
 static void add_string_stream (c2m_ctx_t c2m_ctx, const char *pos_fname, const char *str) {
@@ -1053,7 +1052,9 @@ static int cs_get (c2m_ctx_t c2m_ctx) {
       assert (VARR_GET (char, cs->ln, 0) == '\n');
     } else if (len > 0) {
       cs->pos.ln_pos++;
-      return VARR_POP (char, cs->ln);
+      /* A source byte as unsigned char, the way fgetc returns it: where char is signed,
+         byte 0xFF would otherwise read back as -1, i.e. EOF. */
+      return (unsigned char) VARR_POP (char, cs->ln);
     }
     if (cs->fname == NULL || !get_line (c2m_ctx)) return EOF;
     len = VARR_LENGTH (char, cs->ln);
@@ -1064,6 +1065,9 @@ static int cs_get (c2m_ctx_t c2m_ctx) {
 }
 
 static void cs_unget (c2m_ctx_t c2m_ctx, int c) {
+  /* EOF never entered the line buffer, so it is not pushed back: the next cs_get finds the
+     end again.  Stored in a char it would read back as a byte (255 where char is unsigned). */
+  if (c == EOF) return;
   cs->pos.ln_pos--;
   VARR_PUSH (char, cs->ln, c);
 }
@@ -2965,14 +2969,12 @@ static void transform_to_header (c2m_ctx_t c2m_ctx, VARR (token_t) * buffer) {
   token_t t;
   pos_t pos;
 
-  for (i = 0; i < VARR_LENGTH (token_t, buffer) && VARR_GET (token_t, buffer, i)->code == ' '; i++)
-    ;
+  for (i = 0; i < VARR_LENGTH (token_t, buffer) && VARR_GET (token_t, buffer, i)->code == ' '; i++);
   if (i >= VARR_LENGTH (token_t, buffer)) return;
   if ((t = VARR_GET (token_t, buffer, i))->node_code != N_LT) return;
   pos = t->pos;
   for (j = i + 1;
-       j < VARR_LENGTH (token_t, buffer) && VARR_GET (token_t, buffer, j)->node_code != N_GT; j++)
-    ;
+       j < VARR_LENGTH (token_t, buffer) && VARR_GET (token_t, buffer, j)->node_code != N_GT; j++);
   if (j >= VARR_LENGTH (token_t, buffer)) return;
   VARR_TRUNC (char, symbol_text, 0);
   VARR_TRUNC (char, temp_string, 0);
@@ -4396,6 +4398,9 @@ static node_t try_attr_spec (c2m_ctx_t c2m_ctx, pos_t pos, node_t *asm_part) {
     else {
       /*warning (c2m_ctx, pos, "GCC attributes are not implemented -- ignoring them")*/
     }
+    node_t r2;
+    while ((r2 = TRY (attr_spec)) != err_node)
+      op_flat_append (c2m_ctx, r, r2);
   }
   return r;
 }
@@ -4526,7 +4531,6 @@ DA (declaration_specs) {
     } else if ((r = TRY_A (type_spec, prev_type_spec)) != err_node) {
       prev_type_spec = r;
     } else if ((r = try_attr_spec (c2m_ctx, spec_pos, FALSE)) != err_node && r != NULL) {
-      continue; /* ignore attrs for declaration specs (type attrs) */
     } else
       break;
     op_append (c2m_ctx, list, r);
@@ -5619,8 +5623,8 @@ static void symbol_clear (symbol_t sym, void *arg MIR_UNUSED) { VARR_DESTROY (no
 
 static void symbol_init (c2m_ctx_t c2m_ctx) {
   MIR_alloc_t alloc = c2m_alloc (c2m_ctx);
-  HTAB_CREATE_WITH_FREE_FUNC (symbol_t, symbol_tab, alloc, 5000, symbol_hash, symbol_eq, symbol_clear,
-                              NULL);
+  HTAB_CREATE_WITH_FREE_FUNC (symbol_t, symbol_tab, alloc, 5000, symbol_hash, symbol_eq,
+                              symbol_clear, NULL);
 }
 
 static int symbol_find (c2m_ctx_t c2m_ctx, enum symbol_mode mode, node_t id, node_t scope,
@@ -5864,7 +5868,7 @@ struct expr {
 struct decl_spec {
   unsigned int typedef_p : 1, extern_p : 1, static_p : 1;
   unsigned int auto_p : 1, register_p : 1, thread_local_p : 1;
-  unsigned int inline_p : 1, no_return_p : 1; /* func specifiers  */
+  unsigned int inline_p : 1, always_inline_p : 1, no_return_p : 1; /* func specifiers  */
   int align;                                  // negative value means undefined
   node_t align_node;                          //  strictest valid N_ALIGNAS node
   node_code_t linkage;  // N_IGNORE - none, N_STATIC - internal, N_EXTERN - external
@@ -6260,7 +6264,22 @@ static void set_type_layout (c2m_ctx_t c2m_ctx, struct type *type) {
 
           if (anon_process_p) update_members_offset (decl->decl_spec.type, MIR_SIZE_MAX);
           set_type_layout (c2m_ctx, decl->decl_spec.type);
-          if ((member_size = type_size (c2m_ctx, decl->decl_spec.type)) == 0) continue;
+          if ((member_size = type_size (c2m_ctx, decl->decl_spec.type)) == 0) {
+            /* A zero-size member -- a GNU zero-length array, e.g. `char a[0];`
+               -- occupies no storage and does not advance the layout, but it
+               still has a position: GCC places it at the current offset (just
+               past the preceding members).  `continue`-ing left decl->offset at
+               its default 0, so &s.a aliased the first member.  Set its offset
+               to the current (aligned) running offset; do not grow the type. */
+            member_align = type_align (decl->decl_spec.type);
+            if (decl->decl_spec.align > member_align) member_align = decl->decl_spec.align;
+            decl->offset = type->mode == TM_UNION
+                             ? 0
+                             : (overall_size + member_align - 1) / member_align * member_align;
+            decl->bit_offset = -1;
+            decl->width = -1;
+            continue;
+          }
           member_align = type_align (decl->decl_spec.type);
           bits
             = width->code == N_IGNORE || !(expr = width->attr)->const_p ? -1 : (int) expr->c.u_val;
@@ -6314,8 +6333,7 @@ static int incomplete_type_p (c2m_ctx_t c2m_ctx, struct type *type) {
 
     if (NL_EL (n->u.ops, 1)->code == N_IGNORE) return TRUE;
     for (scope = curr_scope; scope != NULL && scope != top_scope && scope != n;
-         scope = ((struct node_scope *) scope->attr)->scope)
-      ;
+         scope = ((struct node_scope *) scope->attr)->scope);
     return scope == n;
   }
   case TM_PTR: return FALSE;
@@ -6438,7 +6456,7 @@ static void convert_value (struct expr *e, struct type *to) { cast_value (e, e, 
 
 static int non_reg_decl_spec_p (struct decl_spec *ds) {
   return (ds->typedef_p || ds->extern_p || ds->static_p || ds->auto_p || ds->thread_local_p
-          || ds->inline_p || ds->no_return_p || ds->align_node);
+          || ds->inline_p || ds->always_inline_p || ds->no_return_p || ds->align_node);
 }
 
 static void create_node_scope (c2m_ctx_t c2m_ctx, node_t node) {
@@ -6592,8 +6610,7 @@ static void make_type_complete (c2m_ctx_t c2m_ctx, struct type *type) {
 
 static node_t skip_struct_scopes (node_t scope) {
   for (; scope != NULL && (scope->code == N_STRUCT || scope->code == N_UNION);
-       scope = ((struct node_scope *) scope->attr)->scope)
-    ;
+       scope = ((struct node_scope *) scope->attr)->scope);
   return scope;
 }
 static void check (c2m_ctx_t c2m_ctx, node_t node, node_t context);
@@ -6616,7 +6633,7 @@ static struct decl_spec check_decl_spec (c2m_ctx_t c2m_ctx, node_t r, node_t dec
   r->attr = res = reg_malloc (c2m_ctx, sizeof (struct decl_spec));
   res->typedef_p = res->extern_p = res->static_p = FALSE;
   res->auto_p = res->register_p = res->thread_local_p = FALSE;
-  res->inline_p = res->no_return_p = FALSE;
+  res->inline_p = res->always_inline_p = res->no_return_p = FALSE;
   res->align = -1;
   res->align_node = NULL;
   res->linkage = N_IGNORE;
@@ -6926,6 +6943,23 @@ static struct decl_spec check_decl_spec (c2m_ctx_t c2m_ctx, node_t r, node_t dec
         if (align != 0 && res->align < align) {
           res->align = align;
           res->align_node = n;
+        }
+      }
+      break;
+    }
+    case N_LIST: {
+      node_t attr;
+      for (attr = NL_HEAD (n->u.ops); attr != NULL; attr = NL_NEXT (attr)) {
+        node_t attr_id;
+        if (attr->code != N_ATTR) continue;
+        attr_id = NL_HEAD (attr->u.ops);
+        if (attr_id->code != N_ID) continue;
+        if (strcmp (attr_id->u.s.s, "always_inline") == 0
+            || strcmp (attr_id->u.s.s, "__always_inline__") == 0) {
+          if (!func_p)
+            error (c2m_ctx, POS (n), "non-function declaration with always_inline");
+          else
+            res->always_inline_p = TRUE;
         }
       }
       break;
@@ -7400,8 +7434,7 @@ static int update_init_object_path (c2m_ctx_t c2m_ctx, size_t mark, struct type 
                && (init_object.u.curr_member->code != N_MEMBER
                    || (NL_EL (init_object.u.curr_member->u.ops, 1)->code == N_IGNORE
                        && !anon_struct_union_type_member_p (init_object.u.curr_member)));
-               init_object.u.curr_member = NL_NEXT (init_object.u.curr_member))
-            ;
+               init_object.u.curr_member = NL_NEXT (init_object.u.curr_member));
         } else if (init_object.container_type->mode == TM_UNION
                    && !init_object.field_designator_p) { /* no next union member: */
           init_object.u.curr_member = NULL;
@@ -7514,7 +7547,11 @@ static int check_const_addr_p (c2m_ctx_t c2m_ctx, node_t r, node_t *base, mir_ll
     *base = r;
     *offset = 0;
     *deref = 0;
-    return curr_scope == top_scope;
+    /* A string literal has static storage duration at ANY scope (C11
+       6.4.5p6), so its address is a valid address constant in a static
+       initializer even inside a function.  The static-init data emitter
+       handles an N_STR base at any scope (get_string_data). */
+    return TRUE;
   case N_LABEL_ADDR:
     *base = r;
     *offset = 0;
@@ -8437,6 +8474,10 @@ static const char *check_attrs (c2m_ctx_t c2m_ctx, node_t r, decl_t decl, node_t
     assert (n->code == N_ATTR);
     id = NL_HEAD (n->u.ops);
     assert (id->code == N_ID);
+    if (strcmp (id->u.s.s, "always_inline") == 0 || strcmp (id->u.s.s, "__always_inline__") == 0) {
+      if (check_p) decl->decl_spec.always_inline_p = TRUE;
+      continue;
+    }
     if (strcmp (id->u.s.s, "antialias") != 0) continue;
     list = NL_NEXT (id);
     assert (list->code == N_LIST);
@@ -9172,8 +9213,7 @@ static void check (c2m_ctx_t c2m_ctx, node_t r, node_t context) {
     for (n_spec_index = (int) VARR_LENGTH (node_t, context_stack) - 1;
          n_spec_index >= 0 && (n = VARR_GET (node_t, context_stack, n_spec_index)) != NULL
          && n->code != N_SPEC_DECL;
-         n_spec_index--)
-      ;
+         n_spec_index--);
     if (n_spec_index < (int) VARR_LENGTH (node_t, context_stack) - 1
         && (n_spec_index < 0
             || !get_compound_literal (VARR_GET (node_t, context_stack, n_spec_index + 1), &addr_p)
@@ -9468,8 +9508,7 @@ static void check (c2m_ctx_t c2m_ctx, node_t r, node_t context) {
         error (c2m_ctx, POS (r), "asm register decl should be at the top level");
       } else {
         asm_str = NL_HEAD (asm_part->u.ops)->u.s.s;
-        for (i = 0; asm_str[i] != '\0' && _MIR_name_char_p (c2m_ctx->ctx, asm_str[i], i == 0); i++)
-          ;
+        for (i = 0; asm_str[i] != '\0' && _MIR_name_char_p (c2m_ctx->ctx, asm_str[i], i == 0); i++);
         if (asm_str[i] != '\0') {
           error (c2m_ctx, POS (r), "asm register name %s contains wrong char '%c'", asm_str,
                  asm_str[i]);
@@ -9758,6 +9797,18 @@ static void check (c2m_ctx_t c2m_ctx, node_t r, node_t context) {
     t1 = e1->type;
     e = create_expr (c2m_ctx, r);
     *e->type = *t1;
+    /* Reserve a frame slot for struct/union results so that sibling statement-expressions get
+       independent storage without a dynamic ALLOCA (which would overflow the stack in a loop): */
+    if (func_block_scope != NULL && (t1->mode == TM_STRUCT || t1->mode == TM_UNION)) {
+      struct node_scope *fns = func_block_scope->attr;
+      mir_size_t size = type_size (c2m_ctx, t1);
+      mir_size_t align = var_align (c2m_ctx, t1);
+
+      fns->size = round_size (fns->size, align);
+      e->c.u_val = fns->size;
+      fns->size += size;
+      fns->stack_var_p = TRUE;
+    }
     break;
   }
   case N_BLOCK:
@@ -10158,6 +10209,12 @@ struct gen_ctx {
   int reg_free_mark;
   MIR_label_t continue_label, break_label;
   op_t top_gen_last_op;
+  node_t stmtexpr_last_expr; /* the value-producing last expression of the
+                               statement-expression currently being gen'd, so
+                               its expression-statement is evaluated in value
+                               context (val_p) -- needed for ops that only
+                               materialize their result when used (post ++/--).
+                               Saved/restored across nested statement exprs. */
   struct {
     int res_ref_p; /* flag of returning an aggregate by reference */
     VARR (MIR_type_t) * ret_types;
@@ -10183,6 +10240,7 @@ struct gen_ctx {
 #define continue_label gen_ctx->continue_label
 #define break_label gen_ctx->break_label
 #define top_gen_last_op gen_ctx->top_gen_last_op
+#define stmtexpr_last_expr gen_ctx->stmtexpr_last_expr
 #define proto_info gen_ctx->proto_info
 #define init_els gen_ctx->init_els
 #define memset_proto gen_ctx->memset_proto
@@ -10441,6 +10499,23 @@ static void get_type_alias_name (c2m_ctx_t c2m_ctx, struct type *type, VARR (cha
     break;
   default: assert (FALSE);
   }
+}
+
+/* The OUTERMOST anonymous union a member is declared inside (NULL if none):
+   the member's storage overlaps every other member of that union, so its
+   accesses belong to the union's alias class.  An anonymous struct on the way
+   changes nothing (its members do not overlap); an anonymous union nested in
+   another anonymous union is covered by the outer one. */
+static struct type *enclosing_anon_union_type (decl_t decl) {
+  struct type *res = NULL;
+
+  for (node_t m = decl->containing_unnamed_anon_struct_union_member; m != NULL;) {
+    decl_t md = m->attr;
+
+    if (md->decl_spec.type->mode == TM_UNION) res = md->decl_spec.type;
+    m = md->containing_unnamed_anon_struct_union_member;
+  }
+  return res;
 }
 
 static MIR_alias_t get_type_alias (c2m_ctx_t c2m_ctx, struct type *type) {
@@ -10800,10 +10875,17 @@ static op_t force_val (c2m_ctx_t c2m_ctx, op_t op, int arr_p) {
   MIR_context_t ctx = c2m_ctx->ctx;
   op_t temp_op;
   int sh;
+  MIR_type_t t;
 
   if (arr_p && op.mir_op.mode == MIR_OP_MEM) {
     /* an array -- use a pointer: */
     return mem_to_address (c2m_ctx, op, FALSE);
+  }
+  if (op.decl != NULL && op.decl->addr_p && op.mir_op.mode == MIR_OP_REG
+      && integer_type_p (op.decl->decl_spec.type)) {
+    t = get_mir_type (c2m_ctx, op.decl->decl_spec.type);
+    if (t == MIR_T_I8 || t == MIR_T_U8 || t == MIR_T_I16 || t == MIR_T_U16)
+      return cast (c2m_ctx, op, t, TRUE);
   }
   if (op.decl == NULL || op.decl->bit_offset < 0) return op;
   assert (op.mir_op.mode == MIR_OP_MEM);
@@ -11849,7 +11931,7 @@ static MIR_item_t get_string_data (c2m_ctx_t c2m_ctx, node_t n) {
 
   _MIR_get_temp_item_name (ctx, module, buff, sizeof (buff));
   if (n->code == N_STR) {
-    data = MIR_new_string_data (ctx, buff, (MIR_str_t){n->u.s.len, n->u.s.s});
+    data = MIR_new_string_data (ctx, buff, (MIR_str_t) {n->u.s.len, n->u.s.s});
   } else {
     assert (n->code == N_STR16 || n->code == N_STR32);
     if (n->code == N_STR16) {
@@ -11922,7 +12004,35 @@ static void gen_initializer (c2m_ctx_t c2m_ctx, size_t init_start, op_t var,
     if (rel_offset < size) /* fill the tail: */
       gen_memset (c2m_ctx, offset + rel_offset, base, size - rel_offset);
   } else {
+    VARR (MIR_op_t) * pregen_vals;
+    MIR_alloc_t alloc = c2m_alloc (c2m_ctx);
+
     assert (var.mir_op.mode == MIR_OP_REF);
+    /* gcc/20050929-1.c: pre-compute the element values FIRST, so any out-of-line data a value
+       generates (a compound literal's storage, a string-literal address) is emitted into the module
+       BEFORE this object's own data items.  Otherwise the 2nd+ such sub-object's data is appended
+       into the MIDDLE of this object (the 1st works only because its value is gen'd before this
+       object's first data item exists), and the element's trailing `ref` becomes an anonymous data
+       item attached to the sub-object instead of this object -- truncating it.  Constants gen
+       position-independently, so pre-genning them does not change output; bit-field members
+       (handled inline below) are constants too and need no caching.  Indexed parallel to
+       init_els[init_start..]. */
+    VARR_CREATE (MIR_op_t, pregen_vals, alloc, VARR_LENGTH (init_el_t, init_els) - init_start);
+    for (size_t k = init_start; k < VARR_LENGTH (init_el_t, init_els); k++) {
+      init_el_t init_el = VARR_GET (init_el_t, init_els, k);
+      struct expr *init_expr = init_el.init->attr;
+      MIR_op_t init_val;
+
+      init_val.mode = MIR_OP_UNDEF; /* unused for const-addr elements */
+      if (!init_expr->const_addr_p) {
+        if (init_expr->const_p) {
+          convert_value (init_expr, init_el.el_type);
+          init_expr->type = init_el.el_type; /* right value in the gen below */
+        }
+        init_val = val_gen (c2m_ctx, init_el.init).mir_op;
+      }
+      VARR_PUSH (MIR_op_t, pregen_vals, init_val);
+    }
     for (size_t i = init_start; i < VARR_LENGTH (init_el_t, init_els); i++) {
       init_el = VARR_GET (init_el_t, init_els, i);
       if (i != init_start && init_el.offset == VARR_GET (init_el_t, init_els, i - 1).offset
@@ -11930,11 +12040,9 @@ static void gen_initializer (c2m_ctx_t c2m_ctx, size_t init_start, op_t var,
         continue;
       e = init_el.init->attr;
       if (!e->const_addr_p) {
-        if (e->const_p) {
-          convert_value (e, init_el.el_type);
-          e->type = init_el.el_type; /* to get the right value in the subsequent gen call */
-        }
-        val = val_gen (c2m_ctx, init_el.init);
+        /* value (and any out-of-line data) already computed in the pre-pass */
+        val.decl = NULL;
+        val.mir_op = VARR_GET (MIR_op_t, pregen_vals, i - init_start);
         assert (val.mir_op.mode == MIR_OP_INT || val.mir_op.mode == MIR_OP_UINT
                 || val.mir_op.mode == MIR_OP_FLOAT || val.mir_op.mode == MIR_OP_DOUBLE
                 || val.mir_op.mode == MIR_OP_LDOUBLE || val.mir_op.mode == MIR_OP_STR
@@ -12054,6 +12162,7 @@ static void gen_initializer (c2m_ctx_t c2m_ctx, size_t init_start, op_t var,
       data = MIR_new_bss (ctx, global_name, size - rel_offset);
       if (global_name != NULL) var.decl->u.item = data;
     }
+    VARR_DESTROY (MIR_op_t, pregen_vals);
   }
 }
 
@@ -12193,10 +12302,9 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
   case N_STR16:
   case N_STR32: res = new_op (NULL, MIR_new_ref_op (ctx, get_string_data (c2m_ctx, r))); break;
   case N_STR:
-    res
-      = new_op (NULL,
-                MIR_new_str_op (ctx, (MIR_str_t){r->u.s.len, r->u.s.s}));  //???what to do with decl
-                                                                           // and str in initializer
+    res = new_op (NULL, MIR_new_str_op (ctx, (MIR_str_t) {r->u.s.len,
+                                                          r->u.s.s}));  //???what to do with decl
+                                                                        // and str in initializer
     break;
   case N_COMMA:
     gen (c2m_ctx, NL_HEAD (r->u.ops), NULL, NULL, FALSE, NULL, NULL);
@@ -12573,11 +12681,20 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
     decl = def_node->attr;
     op1 = gen (c2m_ctx, NL_HEAD (r->u.ops), NULL, NULL, r->code == N_DEREF_FIELD, NULL, NULL);
     t = get_mir_type (c2m_ctx, decl->decl_spec.type);
+    /* A member reached through an ANONYMOUS union shares storage with that
+       union's other members, so the access carries the UNION's alias class
+       (get_type_alias registers the member-class conflicts), exactly as a
+       named-union access does.  With the member type's own class instead,
+       `struct { union { long long ival; double fval; }; } v; v.fval = 1.5;
+       return v.ival;` read the stale ival at -O2 (GVN saw two non-conflicting
+       classes) -- issue #473. */
+    struct type *anon_union_type = enclosing_anon_union_type (decl);
     if (r->code == N_FIELD) {
       assert (op1.mir_op.mode == MIR_OP_MEM);
       alias = (op1.mir_op.u.mem.alias != 0 && MIR_alias_name (ctx, op1.mir_op.u.mem.alias)[0] == 'U'
                  ? op1.mir_op.u.mem.alias
-                 : get_type_alias (c2m_ctx, e->type));
+               : anon_union_type != NULL ? get_type_alias (c2m_ctx, anon_union_type)
+                                         : get_type_alias (c2m_ctx, e->type));
       op1.mir_op
         = MIR_new_alias_mem_op (ctx, t, op1.mir_op.u.mem.disp + decl->offset, op1.mir_op.u.mem.base,
                                 op1.mir_op.u.mem.index, op1.mir_op.u.mem.scale, alias,
@@ -12591,7 +12708,8 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
         = MIR_new_alias_mem_op (ctx, t, decl->offset, op1.mir_op.u.reg, 0, 1,
                                 get_type_alias (c2m_ctx, left->type->u.ptr_type->mode == TM_UNION
                                                            ? left->type->u.ptr_type
-                                                           : e->type),
+                                                         : anon_union_type != NULL ? anon_union_type
+                                                                                   : e->type),
                                 decl->decl_spec.type->antialias);
     }
     res = new_op (decl, op1.mir_op);
@@ -12721,7 +12839,7 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
     int prop_set_p = call_expr->builtin_call_p && strcmp (func->u.s.s, PROP_SET) == 0;
     int prop_eq_p = call_expr->builtin_call_p && strcmp (func->u.s.s, PROP_EQ) == 0;
     int prop_ne_p = call_expr->builtin_call_p && strcmp (func->u.s.s, PROP_NE) == 0;
-    int builtin_call_p = alloca_p || va_arg_p || va_start_p, inline_p = FALSE;
+    int builtin_call_p = alloca_p || va_arg_p || va_start_p, inline_p = FALSE, always_inline_p = FALSE;
     node_t block = NL_EL (curr_func_def->u.ops, 3);
     struct node_scope *ns = block->attr;
     target_arg_info_t arg_info;
@@ -12823,9 +12941,13 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
       proto_item = func_type->u.func_type->proto_item;  // ???
       VARR_PUSH (MIR_op_t, call_ops, MIR_new_ref_op (ctx, proto_item));
       op1 = val_gen (c2m_ctx, func);
-      if (!jcall_p && op1.mir_op.mode == MIR_OP_REF && func->code == N_ID
-          && ((decl_t) func_expr->def_node->attr)->decl_spec.inline_p)
-        inline_p = TRUE;
+      if (!jcall_p && op1.mir_op.mode == MIR_OP_REF && func->code == N_ID) {
+        struct decl_spec *ds = &((decl_t) func_expr->def_node->attr)->decl_spec;
+        if (ds->always_inline_p)
+          always_inline_p = TRUE;
+        else if (ds->inline_p)
+          inline_p = TRUE;
+      }
       VARR_PUSH (MIR_op_t, call_ops, op1.mir_op);
     }
     target_init_arg_vars (c2m_ctx, &arg_info);
@@ -12865,9 +12987,15 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
       }
       if (type->mode == TM_STRUCT || type->mode == TM_UNION) {
         if (desirable_dest == NULL) {
+          /* A struct/union va_arg used as an rvalue (no destination object)
+             still needs storage to receive the aggregate; allocate a frame
+             temporary and use its address.  Previously this was a stub that
+             moved 0 into res, so va_block_arg wrote the aggregate to address
+             0 (NULL) -- a miscompile / runtime crash. */
           res = get_new_temp (c2m_ctx, MIR_T_I64);
           MIR_append_insn (ctx, curr_func,
-                           MIR_new_insn (ctx, MIR_MOV, res.mir_op, MIR_new_int_op (ctx, 0)));
+                           MIR_new_insn (ctx, MIR_ALLOCA, res.mir_op,
+                                         MIR_new_int_op (ctx, type_size (c2m_ctx, type))));
         } else {
           assert (desirable_dest->mir_op.mode == MIR_OP_MEM);
           res = mem_to_address (c2m_ctx, *desirable_dest, TRUE);
@@ -12877,7 +13005,10 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
                                        MIR_new_int_op (ctx, type_size (c2m_ctx, type)),
                                        MIR_new_int_op (ctx, target_get_blk_type (c2m_ctx, type)
                                                               - MIR_T_BLK)));
-        if (desirable_dest != NULL) res = *desirable_dest;
+        if (desirable_dest != NULL)
+          res = *desirable_dest;
+        else /* present the freshly allocated buffer as the aggregate lvalue */
+          res.mir_op = MIR_new_mem_op (ctx, MIR_T_UNDEF, 0, res.mir_op.u.reg, 0, 1);
       } else {
         MIR_append_insn (ctx, curr_func,
                          MIR_new_insn (ctx, MIR_VA_ARG, op1.mir_op, op2.mir_op,
@@ -12935,9 +13066,10 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
         if (param != NULL) param = NL_NEXT (param);
       }
       call_insn = MIR_new_insn_arr (ctx,
-                                    (jcall_p    ? MIR_JCALL
-                                     : inline_p ? MIR_INLINE
-                                                : MIR_CALL),
+                                    (jcall_p           ? MIR_JCALL
+                                     : always_inline_p ? MIR_INLAY
+                                     : inline_p        ? MIR_INLINE
+                                                       : MIR_CALL),
                                     VARR_LENGTH (MIR_op_t, call_ops) - ops_start,
                                     VARR_ADDR (MIR_op_t, call_ops) + ops_start);
       MIR_append_insn (ctx, curr_func, call_insn);
@@ -12971,16 +13103,28 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
     const char *name;
 
     decl = (decl_t) r->attr;
+    /* C17 6.9.2p1: a file-scope object declaration WITH an initializer is an
+       external DEFINITION even when it also says `extern` -- gcc, clang and
+       MSVC all define the object (gcc and clang warn).  Emitting an import for
+       it dropped the initializer: the object was defined nowhere ("import of
+       undefined item") or, with a definition in another unit, its initializer
+       was silently ignored (issue #472). */
+    int extern_def_p
+      = (declarator != NULL && declarator->code == N_DECL && decl->decl_spec.extern_p
+         && decl->scope == top_scope && decl->decl_spec.type->mode != TM_FUNC
+         && !decl->decl_spec.typedef_p && !decl->asm_p && initializer->code != N_IGNORE);
     if (declarator != NULL && declarator->code != N_IGNORE && decl->u.item == NULL) {
       id = NL_HEAD (declarator->u.ops);
       name = (decl->scope != top_scope && decl->decl_spec.static_p
                 ? get_func_static_var_name (c2m_ctx, id->u.s.s, decl)
                 : id->u.s.s);
+      if (extern_def_p)
+        warning (c2m_ctx, POS (id), "'%s' initialized and declared 'extern'", id->u.s.s);
       if (decl->asm_p) {
       } else if (decl->used_p && decl->scope != top_scope && decl->decl_spec.linkage == N_STATIC) {
         decl->u.item = MIR_new_forward (ctx, name);
         move_item_forward (c2m_ctx, decl->u.item);
-      } else if (decl->used_p && decl->decl_spec.linkage != N_IGNORE) {
+      } else if (decl->used_p && decl->decl_spec.linkage != N_IGNORE && !extern_def_p) {
         if (symbol_find (c2m_ctx, S_REGULAR, id,
                          decl->decl_spec.linkage == N_EXTERN ? top_scope : decl->scope, &sym)
             && (decl->u.item = get_ref_item (c2m_ctx, sym.def_node, name)) == NULL) {
@@ -12993,7 +13137,8 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
         if (decl->scope != top_scope) move_item_forward (c2m_ctx, decl->u.item);
       }
       if (declarator->code == N_DECL && decl->decl_spec.type->mode != TM_FUNC
-          && !decl->decl_spec.typedef_p && !decl->decl_spec.extern_p && !decl->asm_p) {
+          && !decl->decl_spec.typedef_p && (!decl->decl_spec.extern_p || extern_def_p)
+          && !decl->asm_p) {
         if (initializer->code == N_IGNORE) {
           if (decl->scope != top_scope && decl->decl_spec.static_p) {
             decl->u.item = MIR_new_bss (ctx, name, raw_type_size (c2m_ctx, decl->decl_spec.type));
@@ -13010,6 +13155,34 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
             }
             if (i >= VARR_LENGTH (node_t, sym.defs)) /* No item yet or no decl with intializer: */
               decl->u.item = MIR_new_bss (ctx, name, raw_type_size (c2m_ctx, decl->decl_spec.type));
+          } else if (decl->scope != top_scope && !decl->decl_spec.static_p
+                     && !decl->decl_spec.thread_local_p && decl->used_p
+                     && integer_type_p (decl->decl_spec.type)) {
+            /* An uninitialized narrow (i8/u8/i16/u16) auto local homed in a
+               reg starts as stale 64-bit garbage: no extending store ever
+               ran, so a read can yield a value outside the type's range.
+               Extend it once at its declaration so reads keep needing no
+               extension (issue 458 follow-up).  Memory-homed decls (addr_p
+               etc.) read through typed loads, which already extend -- gen
+               yields a non-reg op for them and they are skipped. */
+            MIR_type_t vt = get_mir_type (c2m_ctx, decl->decl_spec.type);
+            if (vt == MIR_T_I8 || vt == MIR_T_U8 || vt == MIR_T_I16 || vt == MIR_T_U16) {
+              if (id->attr == NULL) { /* as in the initializer path below */
+                node_t saved_scope = curr_scope;
+
+                curr_scope = decl->scope;
+                check (c2m_ctx, id, NULL);
+                curr_scope = saved_scope;
+              }
+              op_t vr = gen (c2m_ctx, id, NULL, NULL, FALSE, NULL, NULL);
+              if (vr.mir_op.mode == MIR_OP_REG)
+                emit2 (c2m_ctx,
+                       vt == MIR_T_I8    ? MIR_EXT8
+                       : vt == MIR_T_U8  ? MIR_UEXT8
+                       : vt == MIR_T_I16 ? MIR_EXT16
+                                         : MIR_UEXT16,
+                       vr.mir_op, vr.mir_op);
+            }
           }
         } else if (initializer->code != N_IGNORE) {  // ??? general code
           init_start = VARR_LENGTH (init_el_t, init_els);
@@ -13076,6 +13249,7 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
             && NL_HEAD (declarator->u.ops)->code == N_ID);
     assert (decl_type->mode == TM_FUNC);
     reg_free_mark = 0;
+    stmtexpr_last_expr = NULL;
     curr_func_def = r;
     curr_call_arg_area_offset = 0;
     collect_args_and_func_types (c2m_ctx, decl_type->u.func_type);
@@ -13166,8 +13340,33 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
     break;
   }
   case N_STMTEXPR: {
-    gen (c2m_ctx, NL_HEAD (r->u.ops), NULL, NULL, FALSE, NULL, NULL);
+    struct type *stmtexpr_type = ((struct expr *) r->attr)->type;
+    node_t block = NL_HEAD (r->u.ops);
+    node_t last_stmt = NL_TAIL (NL_EL (block->u.ops, 1)->u.ops);
+    node_t saved_last_expr = stmtexpr_last_expr;
+
+    /* The value of the statement expression is its block's last expression.  Mark that expression
+       so its expression-statement is gen'd in value context (val_p): ops that only materialize
+       their result when used -- post ++/-- -- otherwise leave an undef operand here.  Save/restore
+       for nested statement expressions. */
+    stmtexpr_last_expr
+      = (last_stmt != NULL && last_stmt->code == N_EXPR) ? NL_EL (last_stmt->u.ops, 1) : NULL;
+    gen (c2m_ctx, block, NULL, NULL, FALSE, NULL, NULL);
+    stmtexpr_last_expr = saved_last_expr;
     res = top_gen_last_op;
+    /* A statement expression whose value is a struct/union yields the lvalue of an in-block local,
+       but that local's stack storage can be reused by a sibling scope -- e.g. `({..A..}).x -
+       ({..B..}).x`, where c2mir assigns the A and B block-locals the same fp slot.  Copy the
+       aggregate out into a frame slot reserved during the check phase so each value has independent
+       storage without a dynamic ALLOCA (safe in loops). */
+    if (stmtexpr_type->mode == TM_STRUCT || stmtexpr_type->mode == TM_UNION) {
+      mir_size_t size = type_size (c2m_ctx, stmtexpr_type);
+      struct expr *se = r->attr;
+      op_t tmp = new_op (NULL, MIR_new_mem_op (ctx, MIR_T_UNDEF, (MIR_disp_t) se->c.u_val,
+                                               MIR_reg (ctx, FP_NAME, curr_func->u.func), 0, 1));
+      block_move (c2m_ctx, tmp, res, size);
+      res = tmp;
+    }
     break;
   }
   case N_BLOCK:
@@ -13451,11 +13650,19 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
                                           VARR_ADDR (MIR_op_t, ret_ops)));
     break;
   }
-  case N_EXPR:
+  case N_EXPR: {
+    node_t e = NL_EL (r->u.ops, 1);
+
     assert (false_label == NULL && true_label == NULL);
     emit_label (c2m_ctx, r);
-    top_gen (c2m_ctx, NL_EL (r->u.ops, 1), NULL, NULL, NULL);
+    if (e == stmtexpr_last_expr)
+      /* Value-producing last expression of a statement expression: evaluate in
+         value context so post ++/-- materialize their result (see N_STMTEXPR). */
+      top_gen_last_op = gen (c2m_ctx, e, NULL, NULL, TRUE, NULL, NULL);
+    else
+      top_gen (c2m_ctx, e, NULL, NULL, NULL);
     break;
+  }
   default: abort ();
   }
 finish:
@@ -13752,6 +13959,7 @@ static void print_decl_spec (c2m_ctx_t c2m_ctx, FILE *f, struct decl_spec *decl_
   if (decl_spec->register_p) fprintf (f, " register, ");
   if (decl_spec->thread_local_p) fprintf (f, " thread local, ");
   if (decl_spec->inline_p) fprintf (f, " inline, ");
+  if (decl_spec->always_inline_p) fprintf (f, " always_inline, ");
   if (decl_spec->no_return_p) fprintf (f, " no return, ");
   if (decl_spec->align >= 0) fprintf (f, " align = %d, ", decl_spec->align);
   if (decl_spec->align_node != NULL)

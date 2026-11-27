@@ -91,7 +91,7 @@ void *va_arg_builtin (void *p, uint64_t t) {
     va->__gr_offs += 8;
   } else {
     if (type == MIR_T_LD && __SIZEOF_LONG_DOUBLE__ == 16)
-      va->__stack = (void *) (((uint64_t) va->__stack + 15) % 16);
+      va->__stack = (void *) (((uint64_t) va->__stack + 15) / 16 * 16);
     a = va->__stack;
     va->__stack
       = (char *) va->__stack + (type == MIR_T_LD && __SIZEOF_LONG_DOUBLE__ == 16 ? 16 : 8);
@@ -100,10 +100,17 @@ void *va_arg_builtin (void *p, uint64_t t) {
   return a;
 }
 
-void va_block_arg_builtin (void *res, void *p, size_t s, uint64_t ncase MIR_UNUSED) {
+void va_block_arg_builtin (void *res, void *p, size_t s, uint64_t ncase) {
   struct aarch64_va_list *va = p;
+  MIR_type_t type = (MIR_type_t) (MIR_T_BLK + ncase);
+  size_t hfa_n = target_hfa_members (type, s);
 #if defined(__APPLE__)
   void *a = (void *) va->arg_area;
+  if (hfa_n != 0) { /* HFAs are passed by value on the stack */
+    va->arg_area += target_hfa_stack_size (type, s) / sizeof (uint64_t);
+    if (res != NULL) memcpy (res, a, s);
+    return;
+  }
   if (s <= 2 * 8) {
     va->arg_area += (s + sizeof (uint64_t) - 1) / sizeof (uint64_t);
   } else {
@@ -115,6 +122,28 @@ void va_block_arg_builtin (void *res, void *p, size_t s, uint64_t ncase MIR_UNUS
   void *a;
   long size = (s + 7) / 8 * 8;
 
+  if (hfa_n != 0) {
+    /* An HFA is in the FP reg save area (one 16-byte slot per member) if all its
+       members fit, otherwise on the stack in memory layout; __vr_offs advances
+       either way, as in GCC.  */
+    size_t el_size = target_hfa_el_size (type);
+    int offs = va->__vr_offs;
+
+    if (offs < 0) {
+      va->__vr_offs = offs + 16 * (int) hfa_n;
+      if (va->__vr_offs <= 0) {
+        if (res != NULL)
+          for (size_t n = 0; n < hfa_n; n++)
+            memcpy ((char *) res + n * el_size, (char *) va->__vr_top + offs + 16 * n, el_size);
+        return;
+      }
+    }
+    if (el_size == 16) va->__stack = (void *) (((uint64_t) va->__stack + 15) / 16 * 16);
+    a = va->__stack;
+    va->__stack = (char *) va->__stack + target_hfa_stack_size (type, s);
+    if (res != NULL) memcpy (res, a, s);
+    return;
+  }
   if (size <= 2 * 8 && va->__gr_offs + size > 0) { /* not enough regs to pass: */
     a = va->__stack;
     va->__stack = (char *) va->__stack + size;
@@ -207,8 +236,10 @@ void *_MIR_get_thunk (MIR_context_t ctx) {
   return _MIR_publish_code (ctx, (uint8_t *) pat, sizeof (pat));
 }
 
-void _MIR_redirect_thunk (MIR_context_t ctx, void *thunk, void *to) {
-  static const uint32_t branch_pat1 = 0xd61f0120; /* br x9 */
+/* The far form clobbers x<temp_reg>: callers must pick a register that holds
+   nothing live at the redirect site.  */
+static void redirect_thunk_by_reg (MIR_context_t ctx, void *thunk, void *to,
+                                   unsigned temp_reg) {
   static const uint32_t branch_pat2 = 0x14000000; /* b x */
   int64_t offset = (uint32_t *) to - (uint32_t *) thunk;
   uint32_t code[4];
@@ -218,11 +249,15 @@ void _MIR_redirect_thunk (MIR_context_t ctx, void *thunk, void *to) {
     code[0] = branch_pat2 | ((uint32_t) offset & BR_OFFSET_MASK);
     _MIR_change_code (ctx, thunk, (uint8_t *) &code[0], sizeof (code[0]));
   } else {
-    code[0] = 0x58000049; /* ldr x9,8 (pc-relative) */
-    code[1] = branch_pat1;
+    code[0] = 0x58000040 | temp_reg;        /* ldr x<temp_reg>,8 (pc-relative) */
+    code[1] = 0xd61f0000 | (temp_reg << 5); /* br x<temp_reg> */
     *(void **) &code[2] = to;
     _MIR_change_code (ctx, thunk, (uint8_t *) code, sizeof (code));
   }
+}
+
+void _MIR_redirect_thunk (MIR_context_t ctx, void *thunk, void *to) {
+  redirect_thunk_by_reg (ctx, thunk, to, 9);
 }
 
 void *_MIR_get_thunk_addr (MIR_context_t ctx MIR_UNUSED, void *thunk) {
@@ -330,6 +365,7 @@ void *_MIR_get_ff_call (MIR_context_t ctx, size_t nres, MIR_type_t *res_types, s
   MIR_type_t type;
   uint32_t n_xregs = 0, n_vregs = 0, sp_offset = 0, blk_offset = 0, pat, offset_imm, scale;
   uint32_t sp = 31, addr_reg, qwords;
+  size_t hfa_n;
   const uint32_t temp_reg = 10; /* x10 */
   VARR (uint8_t) * code;
   void *res;
@@ -341,7 +377,16 @@ void *_MIR_get_ff_call (MIR_context_t ctx, size_t nres, MIR_type_t *res_types, s
     if (i == arg_vars_num) n_xregs = n_vregs = 8;
 #endif
     type = arg_descs[i].type;
-    if ((MIR_T_I8 <= type && type <= MIR_T_U64) || type == MIR_T_P || MIR_all_blk_type_p (type)) {
+    if ((hfa_n = target_hfa_members (type, arg_descs[i].size)) != 0) {
+      if (n_vregs + hfa_n <= 8) {
+        n_vregs += hfa_n;
+      } else { /* on the stack in memory layout: */
+        n_vregs = 8;
+        if (target_hfa_el_size (type) == 16) blk_offset = (blk_offset + 15) / 16 * 16;
+        blk_offset += target_hfa_stack_size (type, arg_descs[i].size);
+      }
+    } else if ((MIR_T_I8 <= type && type <= MIR_T_U64) || type == MIR_T_P
+               || MIR_all_blk_type_p (type)) {
       if (MIR_blk_type_p (type) && (qwords = (arg_descs[i].size + 7) / 8) <= 2) {
         if (n_xregs + qwords > 8) blk_offset += qwords * 8;
         n_xregs += qwords;
@@ -364,7 +409,32 @@ void *_MIR_get_ff_call (MIR_context_t ctx, size_t nres, MIR_type_t *res_types, s
     type = arg_descs[i].type;
     scale = type == MIR_T_F ? 2 : type == MIR_T_LD && __SIZEOF_LONG_DOUBLE__ == 16 ? 4 : 3;
     offset_imm = (((i + nres) * sizeof (long double) << 10)) >> scale;
-    if (MIR_blk_type_p (type)) {
+    if ((hfa_n = target_hfa_members (type, arg_descs[i].size)) != 0) {
+      size_t el_size = target_hfa_el_size (type);
+      /* ldr s|d|q, [xn], offset: */
+      uint32_t ld_el_pat = el_size == 4 ? 0xbd400000 : el_size == 8 ? 0xfd400000 : 0x3dc00000;
+
+      addr_reg = 13;
+      pat = ld_pat | offset_imm | addr_reg; /* x13 = block address */
+      push_insns (code, &pat, sizeof (pat));
+      if (n_vregs + hfa_n <= 8) { /* members in consecutive FP arg regs: */
+        for (uint32_t n = 0; n < hfa_n; n++) {
+          pat = ld_el_pat | (n << 10) | (addr_reg << 5) | n_vregs++;
+          push_insns (code, &pat, sizeof (pat));
+        }
+      } else { /* copy it to the stack in memory layout: */
+        n_vregs = 8;
+        if (el_size == 16) sp_offset = (sp_offset + 15) / 16 * 16;
+        qwords = (uint32_t) target_hfa_stack_size (type, arg_descs[i].size) / 8;
+        for (uint32_t n = 0; n < qwords; n++) {
+          pat = gen_ld_pat | (n << 10) | temp_reg | (addr_reg << 5);
+          push_insns (code, &pat, sizeof (pat));
+          pat = st_pat | ((sp_offset >> 3) << 10) | temp_reg | (sp << 5);
+          push_insns (code, &pat, sizeof (pat));
+          sp_offset += 8;
+        }
+      }
+    } else if (MIR_blk_type_p (type)) {
       qwords = (arg_descs[i].size + 7) / 8;
       if (qwords <= 2) {
         addr_reg = 13;
@@ -414,7 +484,8 @@ void *_MIR_get_ff_call (MIR_context_t ctx, size_t nres, MIR_type_t *res_types, s
       if (n_vregs < 8) {
         pat |= offset_imm | n_vregs++;
       } else {
-        if (type == MIR_T_LD && __SIZEOF_LONG_DOUBLE__ == 16) sp_offset = (sp_offset + 15) % 16;
+        if (type == MIR_T_LD && __SIZEOF_LONG_DOUBLE__ == 16)
+          sp_offset = (sp_offset + 15) / 16 * 16;
         pat |= offset_imm | temp_reg;
         push_insns (code, &pat, sizeof (pat));
         pat = type == MIR_T_F                                  ? sts_pat
@@ -534,6 +605,10 @@ void *_MIR_get_interp_shim (MIR_context_t ctx, MIR_item_t func_item, void *handl
   sp_offset = 0;
   for (size_t i = 0; i < func->nargs; i++) { /* args */
     type = VARR_GET (MIR_var_t, func->vars, i).type;
+    if (target_hfa_members (type, VARR_GET (MIR_var_t, func->vars, i).size) != 0) {
+      sp_offset += target_hfa_stack_size (type, VARR_GET (MIR_var_t, func->vars, i).size);
+      continue;
+    }
     if (MIR_blk_type_p (type)
         && (qwords = (VARR_GET (MIR_var_t, func->vars, i).size + 7) / 8) <= 2) {
       /* passing by one or two qwords */
@@ -547,8 +622,35 @@ void *_MIR_get_interp_shim (MIR_context_t ctx, MIR_item_t func_item, void *handl
   stack_arg_sp_offset = 0;
   n_xregs = n_vregs = 0;
   for (size_t i = 0; i < func->nargs; i++) { /* args */
+    size_t hfa_n, size = VARR_GET (MIR_var_t, func->vars, i).size;
+
     type = VARR_GET (MIR_var_t, func->vars, i).type;
     scale = type == MIR_T_F ? 2 : 3;
+    if ((hfa_n = target_hfa_members (type, size)) != 0) {
+      /* lay the HFA out at sp_offset in memory layout, as va_block_arg expects: */
+      size_t el_size = target_hfa_el_size (type), stack_size = target_hfa_stack_size (type, size);
+      uint32_t el_scale = el_size == 4 ? 2 : 3;
+
+      if (n_vregs + hfa_n <= 8) { /* str s|d vreg, sp_offset+n*el_size[sp] */
+        for (size_t n = 0; n < hfa_n; n++) {
+          pat = (el_size == 4 ? sts_pat : std_pat)
+                | ((uint32_t) ((sp_offset + n * el_size) >> el_scale) << 10) | n_vregs++
+                | (sp << 5);
+          push_insns (code, &pat, sizeof (pat));
+        }
+      } else { /* ldr t, stack_arg_offset[x9]; st t, offset[sp]; ... */
+        n_vregs = 8;
+        for (size_t n = 0; n < stack_size / 8; n++) {
+          pat = (ld_pat & base_reg_mask) | (stack_arg_sp_offset >> 3) << 10 | temp_reg | (9 << 5);
+          push_insns (code, &pat, sizeof (pat));
+          pat = st_pat | (((sp_offset + n * 8) >> 3) << 10) | temp_reg | (sp << 5);
+          push_insns (code, &pat, sizeof (pat));
+          stack_arg_sp_offset += 8;
+        }
+      }
+      sp_offset += stack_size;
+      continue;
+    }
     if (MIR_blk_type_p (type)
         && (qwords = (VARR_GET (MIR_var_t, func->vars, i).size + 7) / 8) <= 2) {
       /* passing by one or two qwords */
@@ -596,7 +698,10 @@ void *_MIR_get_interp_shim (MIR_context_t ctx, MIR_item_t func_item, void *handl
         sp_offset += 8;
       } else {
         pat = ((type == MIR_T_F ? lds_pat : ldd_pat) & base_reg_mask) | (9 << 5);
-        pat |= stack_arg_sp_offset | temp_reg;
+        /* the caller's stack slot offset is an imm12 SCALED by the access size,
+           in bits [21:10]; the raw byte offset OR-ed into the register fields was
+           right only for the first stack FP argument (offset 0) */
+        pat |= ((stack_arg_sp_offset >> scale) << 10) | temp_reg;
         push_insns (code, &pat, sizeof (pat));
         pat = (type == MIR_T_F ? sts_pat : std_pat) | ((sp_offset >> scale) << 10) | temp_reg
               | (sp << 5);
@@ -756,7 +861,12 @@ void *_MIR_get_bb_thunk (MIR_context_t ctx, void *bb_version, void *handler) {
   offset = gen_mov_addr (code, 9, bb_version); /* x9 = bb_version */
   push_insns (code, pat, sizeof (pat));
   res = _MIR_publish_code (ctx, VARR_ADDR (uint8_t, code), VARR_LENGTH (uint8_t, code));
-  _MIR_redirect_thunk (ctx, (uint8_t *) res + offset, handler);
+  /* x9 carries bb_version to the handler, so the branch to the handler must
+     not use _MIR_redirect_thunk's x9-based far form: when the thunk ends up
+     farther than a direct branch can reach (+-128MB) from the handler, the
+     handler would receive its own address instead of bb_version.  Use x10,
+     the other fixed temp not used in machinized code.  */
+  redirect_thunk_by_reg (ctx, (uint8_t *) res + offset, handler, 10);
 #if 0
   if (getenv ("MIR_code_dump") != NULL)
     _MIR_dump_code ("bb thunk:", res, VARR_LENGTH (uint8_t, code));

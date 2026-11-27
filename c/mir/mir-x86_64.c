@@ -57,6 +57,10 @@ void *va_arg_builtin (void *p, uint64_t t) {
     a = (char *) va->reg_save_area + va->gp_offset;
     va->gp_offset += 8;
   } else {
+    /* SysV 3.5.7 step 7: a long double takes a 16-byte ALIGNED slot of the
+       overflow area (gcc/clang callers place it there) */
+    if (type == MIR_T_LD)
+      va->overflow_arg_area = (uint64_t *) (((uint64_t) va->overflow_arg_area + 15) / 16 * 16);
     a = va->overflow_arg_area;
     va->overflow_arg_area += type == MIR_T_LD ? 2 : 1;
   }
@@ -84,6 +88,9 @@ void va_block_arg_builtin (void *res, void *p, size_t s, uint64_t ncase) {
     if (res != NULL) memcpy (res, &u, s);
     return;
   case 2:
+    /* Each SSE eightbyte takes a 16-byte slot of the 48..176 save area; a
+       block that doesn't fit is in the overflow area. */
+    if (va->fp_offset + size * 2 > 176) break;
     u[0].d = *(double *) ((char *) va->reg_save_area + va->fp_offset);
     va->fp_offset += 16;
     if (size > 8) {
@@ -102,7 +109,12 @@ void va_block_arg_builtin (void *res, void *p, size_t s, uint64_t ncase) {
       u[0].d = *(double *) ((char *) va->reg_save_area + va->fp_offset);
       u[1].i = *(uint64_t *) ((char *) va->reg_save_area + va->gp_offset);
     }
-    va->fp_offset += 8;
+    /* An SSE eightbyte occupies a 16-byte slot in the register save area
+       (each XMM is stored in 16 bytes), so fp_offset must advance by 16 --
+       matching the SSE-only path (case 2) and va_arg_builtin.  Advancing by
+       only 8 made the next mixed-class struct's SSE field read an
+       overlapping/stale slot.  The INTEGER eightbyte is 8 bytes. */
+    va->fp_offset += 16;
     va->gp_offset += 8;
     if (res != NULL) memcpy (res, &u, s);
     return;
@@ -456,6 +468,9 @@ void *_MIR_get_ff_call (MIR_context_t ctx, size_t nres, MIR_type_t *res_types, s
         sp_offset += 8;
       }
     } else if (type == MIR_T_LD) {
+      /* a 16-byte aligned stack slot (SysV 3.2.3); the area below is 16-byte
+         aligned at the call */
+      sp_offset = (sp_offset + 15) / 16 * 16;
       gen_ldst80 (code, sp_offset, (uint32_t) ((i + nres) * sizeof (long double)));
       sp_offset += 16;
     } else if (MIR_blk_type_p (type)) {
@@ -466,8 +481,7 @@ void *_MIR_get_ff_call (MIR_context_t ctx, size_t nres, MIR_type_t *res_types, s
         gen_mov (code, (i + nres) * sizeof (long double), 12, TRUE);   /* r12 = block addr */
         gen_mov2 (code, 0, iregs[n_iregs], TRUE);                      /* arg_reg = mem[r12] */
         if (qwords == 2) gen_mov2 (code, 8, iregs[n_iregs + 1], TRUE); /* arg_reg = mem[r12 + 8] */
-        n_iregs += qwords;
-        n_xregs += qwords;
+        n_iregs += qwords; /* an all-INTEGER block consumes no SSE registers */
         continue;
       } else if (type == MIR_T_BLK + 2 && n_xregs + qwords <= max_xregs) {
         assert (qwords <= 2);
@@ -481,7 +495,6 @@ void *_MIR_get_ff_call (MIR_context_t ctx, size_t nres, MIR_type_t *res_types, s
         gen_mov (code, (i + nres) * sizeof (long double), 12, TRUE); /* r12 = block addr */
         gen_mov2 (code, 0, iregs[n_iregs], TRUE);                    /* arg_reg = mem[r12] */
         n_iregs++;
-        n_xregs++;
         gen_movxmm2 (code, 8, n_xregs, TRUE); /* xmm = mem[r12 + 8] */
         n_xregs++;
         continue;
@@ -492,7 +505,6 @@ void *_MIR_get_ff_call (MIR_context_t ctx, size_t nres, MIR_type_t *res_types, s
         n_xregs++;
         gen_mov2 (code, 8, iregs[n_iregs], TRUE); /* arg_reg = mem[r12 + 8] */
         n_iregs++;
-        n_xregs++;
         continue;
       }
       gen_blk_mov (code, sp_offset, (i + nres) * sizeof (long double), qwords);
