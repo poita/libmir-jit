@@ -131,8 +131,7 @@ auto add = cast(int function(int,int)) MIR_gen(ctx, mirFindFunc(ctx, "add"));
 
 See [`examples/c2mir_string.d`](examples/c2mir_string.d). Two helpers make this
 ergonomic: `mirModules(ctx)` iterates the context's modules, and
-`mirFindFunc(ctx, "name")` locates a compiled function (MIR's
-`MIR_get_global_item` is declared in the header but not implemented upstream).
+`mirFindFunc(ctx, "name")` locates a compiled function by name.
 
 ### Idiomatic layer: `jit` and `CModule`
 

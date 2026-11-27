@@ -174,7 +174,7 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
   MIR_func_t func = curr_func_item->u.func;
   MIR_proto_t proto = call_insn->ops[0].u.ref->u.proto;
   size_t size, nargs, nops = MIR_insn_nops (ctx, call_insn), start = proto->nres + 2;
-  size_t int_arg_num = 0, fp_arg_num = 0, xmm_args = 0;
+  size_t int_arg_num = 0, fp_arg_num = 0;
   size_t init_arg_stack_size = spill_space_size, arg_stack_size = init_arg_stack_size;
 #ifdef _WIN32
   size_t block_offset = spill_space_size;
@@ -190,7 +190,7 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
   uint32_t n_iregs, n_xregs, n_fregs;
 
   assert (prev_call_insn != NULL);
-  if (call_insn->code == MIR_INLINE) call_insn->code = MIR_CALL;
+  if (call_insn->code == MIR_INLAY || call_insn->code == MIR_INLINE) call_insn->code = MIR_CALL;
   if (proto->args == NULL) {
     nargs = 0;
   } else {
@@ -226,7 +226,6 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
                                      "passing float variadic arg (should be passed as double)");
       type = mode == MIR_OP_DOUBLE ? MIR_T_D : mode == MIR_OP_LDOUBLE ? MIR_T_LD : MIR_T_I64;
     }
-    if (xmm_args < 8 && (type == MIR_T_F || type == MIR_T_D)) xmm_args++;
     ext_insn = NULL;
     if ((ext_code = get_ext_code (type)) != MIR_INVALID_INSN) { /* extend arg if necessary */
       temp_op = _MIR_new_var_op (ctx, gen_new_temp_reg (gen_ctx, MIR_T_I64, func));
@@ -438,6 +437,12 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
                        : type == MIR_T_D  ? MIR_DMOV
                        : type == MIR_T_LD ? MIR_LDMOV
                                           : MIR_MOV);
+#ifndef _WIN32
+      /* SysV 3.2.3: a memory argument is aligned to its type -- a long double
+         takes a 16-byte ALIGNED stack slot, so after an odd number of
+         eightbytes the caller pads one (gcc/clang callees read it there) */
+      if (type == MIR_T_LD) arg_stack_size = (arg_stack_size + 15) / 16 * 16;
+#endif
       mem_op = _MIR_new_var_mem_op (ctx, mem_type, arg_stack_size, SP_HARD_REG, MIR_NON_VAR, 1);
       new_insn = MIR_new_insn (ctx, new_insn_code, mem_op, arg_op);
       gen_assert (prev_call_insn != NULL); /* call_insn should not be 1st after simplification */
@@ -457,8 +462,10 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
 #ifndef _WIN32
   if (proto->vararg_p) {
     setup_call_hard_reg_args (gen_ctx, call_insn, AX_HARD_REG);
+    /* %al: the number of XMM registers used, including those of block args
+       passed in registers (MIR_T_BLK + 2..4). */
     new_insn = MIR_new_insn (ctx, MIR_MOV, _MIR_new_var_op (ctx, AX_HARD_REG),
-                             MIR_new_int_op (ctx, xmm_args));
+                             MIR_new_int_op (ctx, fp_arg_num < 8 ? fp_arg_num : 8));
     gen_add_insn_before (gen_ctx, call_insn, new_insn);
   }
 #else
@@ -813,6 +820,11 @@ static void target_machinize (gen_ctx_t gen_ctx) {
                        : type == MIR_T_D  ? MIR_DMOV
                        : type == MIR_T_LD ? MIR_LDMOV
                                           : MIR_MOV);
+#ifndef _WIN32
+      /* the caller's 16-byte aligned slot for a long double (see the call
+         side): the incoming argument area starts 16-byte aligned */
+      if (type == MIR_T_LD) mem_size = (mem_size + 15) / 16 * 16;
+#endif
       mem_op = _MIR_new_var_mem_op (ctx, mem_type,
                                     mem_size + 8 /* ret */
                                       + start_sp_from_bp_offset,
@@ -859,24 +871,14 @@ static void target_machinize (gen_ctx_t gen_ctx) {
       MIR_op_t va_op = insn->ops[0];
       MIR_reg_t va_reg;
 #ifndef _WIN32
-      int gp_offset = 0, fp_offset = 48, mem_offset = 0;
-      MIR_var_t var;
+      /* Use the arg passing state left by the prologue walk above: it is the
+         only way to agree with the actual layout (register classes of block
+         args, 8-byte rounding of memory-passed blocks, reg exhaustion). */
+      int gp_offset = (int) (int_arg_num > 6 ? 48 : int_arg_num * 8);
+      int fp_offset = (int) (48 + (fp_arg_num > 8 ? 128 : fp_arg_num * 16));
+      int64_t mem_offset = (int64_t) (mem_size - spill_space_size);
 
       assert (func->vararg_p && va_op.mode == MIR_OP_VAR);
-      for (uint32_t narg = 0; narg < func->nargs; narg++) {
-        var = VARR_GET (MIR_var_t, func->vars, narg);
-        if (var.type == MIR_T_F || var.type == MIR_T_D) {
-          fp_offset += 16;
-          if (gp_offset >= 176) mem_offset += 8;
-        } else if (var.type == MIR_T_LD) {
-          mem_offset += 16;
-        } else if (MIR_blk_type_p (var.type)) {
-          mem_offset += var.size;
-        } else { /* including RBLK */
-          gp_offset += 8;
-          if (gp_offset >= 48) mem_offset += 8;
-        }
-      }
       va_reg = va_op.u.var;
       /* Insns can be not simplified as soon as they match a machine insn.  */
       /* mem32[va_reg] = gp_offset; mem32[va_reg] = fp_offset */
@@ -1634,10 +1636,19 @@ static struct pattern patterns[] = {
   {MIR_UEXT32, "r r", "Y 8B r0 R1", 0},     /* mov r0,r1 */
   {MIR_UEXT32, "r m2", "Y 8B r0 m1", 0},    /* mov r0,m1 */
 
-  {MIR_I2F, "r r", "F3 X 0F 2A r0 R1", 0},                  /* cvtsi2ss r0,r1 */
-  {MIR_I2F, "r m3", "F3 X 0F 2A r0 m1", 0},                 /* cvtsi2ss r0,m1 */
-  {MIR_I2D, "r r", "F2 X 0F 2A r0 R1", 0},                  /* cvtsi2sd r0,r1 */
-  {MIR_I2D, "r m3", "F2 X 0F 2A r0 m1", 0},                 /* cvtsi2sd r0,m1 */
+  /* The scalar converts below MERGE into the destination (bits above the
+     result are preserved), so a bare cvt makes the result falsely depend on
+     the destination register's PREVIOUS writer -- in call-heavy FP code that
+     is the previous call's return-value chain, which serializes calls the
+     OoO core could otherwise overlap (2.6-3.2x on sin/cos-heavy loops vs
+     gcc -O0 at identical dynamic instruction counts).  Break the dependency
+     the way gcc and clang do: zero the destination first (pxor dst,dst).
+     The tied "r 0" F2D/D2F forms keep the bare encoding: dst==src is a REAL
+     dependency, and the pxor would destroy the source. */
+  {MIR_I2F, "r r", "66 Y 0F EF r0 R0; F3 X 0F 2A r0 R1", 0},  /* pxor r0,r0; cvtsi2ss r0,r1 */
+  {MIR_I2F, "r m3", "66 Y 0F EF r0 R0; F3 X 0F 2A r0 m1", 0}, /* pxor r0,r0; cvtsi2ss r0,m1 */
+  {MIR_I2D, "r r", "66 Y 0F EF r0 R0; F2 X 0F 2A r0 R1", 0},  /* pxor r0,r0; cvtsi2sd r0,r1 */
+  {MIR_I2D, "r m3", "66 Y 0F EF r0 R0; F2 X 0F 2A r0 m1", 0}, /* pxor r0,r0; cvtsi2sd r0,m1 */
   {MIR_I2LD, "mld r", "X 89 r1 mt; DF /5 mt; DB /7 m0", 0}, /*mov -16(sp),r1;fild -16(sp);fstp m0 */
 
   {MIR_F2I, "r r", "F3 X 0F 2C r0 R1", 0},  /* cvttss2si r0,r1 */
@@ -1645,13 +1656,15 @@ static struct pattern patterns[] = {
   {MIR_D2I, "r r", "F2 X 0F 2C r0 R1", 0},  /* cvttsd2si r0,r1 */
   {MIR_D2I, "r md", "F2 X 0F 2C r0 m1", 0}, /* cvttsd2si r0,m1 */
 
-  {MIR_F2D, "r r", "F3 Y 0F 5A r0 R1", 0},  /* cvtss2sd r0,r1 */
-  {MIR_F2D, "r mf", "F3 Y 0F 5A r0 m1", 0}, /* cvtss2sd r0,m1 */
+  {MIR_F2D, "r 0", "F3 Y 0F 5A r0 R1", 0},                    /* cvtss2sd r0,r0 */
+  {MIR_F2D, "r r", "66 Y 0F EF r0 R0; F3 Y 0F 5A r0 R1", 0},  /* pxor r0,r0; cvtss2sd r0,r1 */
+  {MIR_F2D, "r mf", "66 Y 0F EF r0 R0; F3 Y 0F 5A r0 m1", 0}, /* pxor r0,r0; cvtss2sd r0,m1 */
                                             /* fld m1;fstpl -16(sp);movsd r0,-16(sp): */
   {MIR_LD2D, "r mld", "DB /5 m1; DD /3 mt; F2 Y 0F 10 r0 mt", 0},
 
-  {MIR_D2F, "r r", "F2 Y 0F 5A r0 R1", 0},  /* cvtsd2ss r0,r1 */
-  {MIR_D2F, "r md", "F2 Y 0F 5A r0 m1", 0}, /* cvtsd2ss r0,m1 */
+  {MIR_D2F, "r 0", "F2 Y 0F 5A r0 R1", 0},                    /* cvtsd2ss r0,r0 */
+  {MIR_D2F, "r r", "66 Y 0F EF r0 R0; F2 Y 0F 5A r0 R1", 0},  /* pxor r0,r0; cvtsd2ss r0,r1 */
+  {MIR_D2F, "r md", "66 Y 0F EF r0 R0; F2 Y 0F 5A r0 m1", 0}, /* pxor r0,r0; cvtsd2ss r0,m1 */
   /* fld m1;fstps -16(sp);movss r0, -16(sp): */
   {MIR_LD2F, "r mld", "DB /5 m1; D9 /3 mt; F3 Y 0F 10 r0 mt", 0},
 
@@ -1844,6 +1857,7 @@ static struct pattern patterns[] = {
   /* fld m2;fld m1;fucomip st,st1;fstp st;jp rel32;jne rel32 */
   {MIR_LDBNE, "L mld mld", "DB /5 m2; DB /5 m1; DF E9; DD D8; 0F 8A L0; 0F 85 L0", 0},
 
+  /* MIR_INLINE and MIR_INLAY are machinized into MIR_CALL: */
   {MIR_CALL, "X i3 $", "FF /2 P1", 0},  /* call *rel32(rip)  */
   {MIR_CALL, "X r $", "Y FF /2 R1", 0}, /* call *r1 */
   {MIR_RET, "$", "C3", 0},              /* ret ax, dx, xmm0, xmm1, st0, st1  */

@@ -237,7 +237,7 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
   MIR_func_t func = curr_func_item->u.func;
   MIR_proto_t proto = call_insn->ops[0].u.ref->u.proto;
   size_t nargs, nops = MIR_insn_nops (ctx, call_insn), start = proto->nres + 2;
-  size_t int_arg_num = 0, fp_arg_num = 0, mem_size = 0, blk_offset = 0, qwords;
+  size_t int_arg_num = 0, fp_arg_num = 0, mem_size = 0, blk_offset = 0, qwords, hfa_n;
   MIR_type_t type, mem_type;
   MIR_op_mode_t mode;
   MIR_var_t *arg_vars = NULL;
@@ -249,7 +249,7 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
   MIR_insn_t curr_prev_call_insn = prev_call_insn;
   uint32_t n_iregs, n_vregs;
 
-  if (call_insn->code == MIR_INLINE) call_insn->code = MIR_CALL;
+  if (call_insn->code == MIR_INLAY || call_insn->code == MIR_INLINE) call_insn->code = MIR_CALL;
   if (proto->args == NULL) {
     nargs = 0;
   } else {
@@ -286,7 +286,16 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
 #if defined(__APPLE__)                              /* all varargs are passed on stack */
     if (i - start == nargs) int_arg_num = fp_arg_num = 8;
 #endif
-    if (MIR_blk_type_p (type) && (qwords = (call_insn->ops[i].u.var_mem.disp + 7) / 8) <= 2) {
+    if ((hfa_n = target_hfa_members (type, call_insn->ops[i].u.var_mem.disp)) != 0) {
+      if (fp_arg_num + hfa_n <= 8) {
+        fp_arg_num += hfa_n;
+      } else { /* on the stack in memory layout: */
+        fp_arg_num = 8;
+        if (target_hfa_el_size (type) == 16) blk_offset = (blk_offset + 15) / 16 * 16;
+        blk_offset += target_hfa_stack_size (type, call_insn->ops[i].u.var_mem.disp);
+      }
+    } else if (MIR_blk_type_p (type)
+               && (qwords = (call_insn->ops[i].u.var_mem.disp + 7) / 8) <= 2) {
       if (int_arg_num + qwords > 8) blk_offset += qwords * 8;
       int_arg_num += qwords;
     } else if (get_arg_reg (type, &int_arg_num, &fp_arg_num, &new_insn_code) == MIR_NON_VAR) {
@@ -329,6 +338,36 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
                _MIR_new_var_op (ctx, arg_op.u.var_mem.base));
       call_insn->ops[i] = arg_reg_op;
       continue;
+    } else if ((hfa_n = target_hfa_members (type, arg_op.u.var_mem.disp)) != 0) {
+      MIR_type_t el_type = target_hfa_el_type (type);
+      size_t el_size = target_hfa_el_size (type);
+
+      if (fp_arg_num + hfa_n <= 8) { /* members in consecutive FP arg regs: */
+        new_insn_code = el_type == MIR_T_F ? MIR_FMOV : el_type == MIR_T_D ? MIR_DMOV : MIR_LDMOV;
+        for (size_t n = 0; n < hfa_n; n++) {
+          arg_reg = V0_HARD_REG + fp_arg_num++;
+          new_insn = MIR_new_insn (ctx, new_insn_code, _MIR_new_var_op (ctx, arg_reg),
+                                   _MIR_new_var_mem_op (ctx, el_type, n * el_size,
+                                                        arg_op.u.var_mem.base, MIR_NON_VAR, 1));
+          gen_add_insn_before (gen_ctx, call_insn, new_insn);
+          setup_call_hard_reg_args (gen_ctx, call_insn, arg_reg);
+        }
+        call_insn->ops[i].u.var_mem.base = MIR_NON_VAR; /* not used anymore */
+      } else { /* give up the FP arg regs and copy it to the stack in memory layout: */
+        size_t stack_size = target_hfa_stack_size (type, arg_op.u.var_mem.disp);
+
+        fp_arg_num = 8;
+        if (el_size == 16) mem_size = (mem_size + 15) / 16 * 16;
+        gen_blk_mov (gen_ctx, call_insn, mem_size, SP_HARD_REG, 0, arg_op.u.var_mem.base,
+                     stack_size / 8, int_arg_num);
+        call_insn->ops[i]
+          = _MIR_new_var_mem_op (ctx, MIR_T_UNDEF,
+                                 mem_size, /* we don't care about valid mem disp here */
+                                 SP_HARD_REG, MIR_NON_VAR, 1);
+        mem_size += stack_size;
+        blk_offset += stack_size;
+      }
+      continue;
     } else if (MIR_blk_type_p (type)) {
       qwords = (arg_op.u.var_mem.disp + 7) / 8;
       if (qwords <= 2) {
@@ -362,15 +401,22 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
         }
         continue;
       }
-      gen_blk_mov (gen_ctx, call_insn, blk_offset, SP_HARD_REG, 0, arg_op.u.var_mem.base, qwords,
-                   int_arg_num);
+      /* Pass by reference.  The copy and the address computation must stay
+         BEFORE all the argument hard reg loads: for qwords > 16 the copy is
+         a call to mir.blk_mov, which would clobber argument values already
+         loaded into caller-saved regs (v0-v7, x0-x7) if emitted next to the
+         call insn, so no save_regs band-aid can make that placement work.
+         Advance curr_prev_call_insn to the ADD itself so several block args
+         keep this prologue region contiguous.  */
+      MIR_reg_t blk_base_reg = arg_op.u.var_mem.base;
       arg_op = _MIR_new_var_op (ctx, gen_new_temp_reg (gen_ctx, MIR_T_I64, func));
       gen_assert (curr_prev_call_insn
                   != NULL); /* call_insn should not be 1st after simplification */
       new_insn = MIR_new_insn (gen_ctx->ctx, MIR_ADD, arg_op, _MIR_new_var_op (ctx, SP_HARD_REG),
                                MIR_new_int_op (ctx, blk_offset));
       gen_add_insn_after (gen_ctx, curr_prev_call_insn, new_insn);
-      curr_prev_call_insn = DLIST_NEXT (MIR_insn_t, new_insn);
+      gen_blk_mov (gen_ctx, new_insn, blk_offset, SP_HARD_REG, 0, blk_base_reg, qwords, 0);
+      curr_prev_call_insn = new_insn;
       blk_offset += qwords * 8;
     }
     if ((arg_reg = get_arg_reg (type, &int_arg_num, &fp_arg_num, &new_insn_code)) != MIR_NON_VAR) {
@@ -761,7 +807,7 @@ static void target_machinize (gen_ctx_t gen_ctx) {
   MIR_var_t var;
   MIR_reg_t ret_reg, arg_reg;
   MIR_op_t ret_reg_op, arg_reg_op, mem_op, temp_op;
-  size_t i, int_arg_num, fp_arg_num, mem_size, qwords;
+  size_t i, int_arg_num, fp_arg_num, mem_size, qwords, hfa_n;
 
   assert (curr_func_item->item_type == MIR_func_item);
   func = curr_func_item->u.func;
@@ -776,6 +822,38 @@ static void target_machinize (gen_ctx_t gen_ctx) {
     if (type == MIR_T_RBLK && i == 0) { /* hidden arg */
       arg_reg_op = _MIR_new_var_op (ctx, R8_HARD_REG);
       gen_mov (gen_ctx, anchor, MIR_MOV, _MIR_new_var_op (ctx, i + MAX_HARD_REG + 1), arg_reg_op);
+      continue;
+    } else if ((hfa_n = target_hfa_members (type, var.size)) != 0) {
+      MIR_type_t el_type = target_hfa_el_type (type);
+      size_t el_size = target_hfa_el_size (type);
+
+      if (fp_arg_num + hfa_n <= 8) { /* store the FP arg regs into a block in the frame: */
+        small_aggregate_save_area = (small_aggregate_save_area + var.size + 15) / 16 * 16;
+        new_insn = MIR_new_insn (ctx, MIR_SUB, _MIR_new_var_op (ctx, i + MAX_HARD_REG + 1),
+                                 _MIR_new_var_op (ctx, FP_HARD_REG),
+                                 MIR_new_int_op (ctx, small_aggregate_save_area));
+        gen_add_insn_before (gen_ctx, anchor, new_insn);
+        new_insn_code = el_type == MIR_T_F ? MIR_FMOV : el_type == MIR_T_D ? MIR_DMOV : MIR_LDMOV;
+        for (size_t n = 0; n < hfa_n; n++)
+          gen_mov (gen_ctx, anchor, new_insn_code,
+                   _MIR_new_var_mem_op (ctx, el_type, n * el_size, i + MAX_HARD_REG + 1,
+                                        MIR_NON_VAR, 1),
+                   _MIR_new_var_op (ctx, V0_HARD_REG + fp_arg_num++));
+      } else { /* on the stack in memory layout: */
+        fp_arg_num = 8;
+        if (!block_arg_func_p) {
+          block_arg_func_p = TRUE;
+          gen_mov (gen_ctx, anchor, MIR_MOV, _MIR_new_var_op (ctx, R8_HARD_REG),
+                   _MIR_new_var_mem_op (ctx, MIR_T_I64, 16, FP_HARD_REG, MIR_NON_VAR, 1));
+        }
+        if (el_size == 16) mem_size = (mem_size + 15) / 16 * 16;
+        gen_add_insn_before (gen_ctx, anchor,
+                             MIR_new_insn (ctx, MIR_ADD,
+                                           _MIR_new_var_op (ctx, i + MAX_HARD_REG + 1),
+                                           _MIR_new_var_op (ctx, R8_HARD_REG),
+                                           MIR_new_int_op (ctx, mem_size)));
+        mem_size += target_hfa_stack_size (type, var.size);
+      }
       continue;
     } else if (MIR_blk_type_p (type) && (qwords = (var.size + 7) / 8) <= 2) {
       if (int_arg_num + qwords <= 8) {
@@ -1740,10 +1818,9 @@ static const struct pattern patterns[] = {
   {MIR_D2F, "r r", "1e624000:fffffc00 vd0 vn1"},  /* fcvt Sd,Dn */
   // i2ld, ui2ld, ld2i, f2ld, d2ld, ld2f, ld2d are builtins
 
+  /* MIR_INLINE and MIR_INLAY are machinized into MIR_CALL: */
   {MIR_CALL, "X r $", "d63f0000:fffffc1f rn1"},   /* blr *Rn */
   {MIR_CALL, "X L $", "94000000:fc000000 rn1"},   /* bl address */
-  {MIR_INLINE, "X r $", "d63f0000:fffffc1f rn1"}, /* blr *Rn */
-  {MIR_INLINE, "X L $", "94000000:fc000000 rn1"}, /* bl address */
   {MIR_RET, "$", "d65f0000:fffffc1f hn1e"},       /* ret R30  */
 
   {MIR_JCALL, "X r $", "d61f0000:fffffc00 rn1"}, /* br r1 */
@@ -2168,7 +2245,8 @@ static void out_insn (gen_ctx_t gen_ctx, MIR_insn_t insn, const char *replacemen
       && (insn->ops[1].mode == MIR_OP_INT || insn->ops[1].mode == MIR_OP_UINT))
     insn->ops[1].u.u = (insn->ops[1].u.u + 15) & -16;
   for (insn_str = replacement;; insn_str = p + 1) {
-    char ch, ch2, start_ch, d;
+    char ch, ch2, start_ch;
+    int d; /* hex_value () result: -1 ends a digit run, so not a char (unsigned on linux) */
     uint32_t opcode = 0, opcode_mask = 0xffffffff;
     int rd = -1, rn = -1, rm = -1, ra = -1, disp = -1, scale = -1;
     int immr = -1, imms = -1, imm16 = -1, imm16_shift = -1, imm12 = -1, imm12_shift = -1;
@@ -2338,7 +2416,8 @@ static void out_insn (gen_ctx_t gen_ctx, MIR_insn_t insn, const char *replacemen
       case 'l':
       case 'L': {
         int nop = 0;
-        if (insn->code == MIR_LADDR || insn->code == MIR_CALL || insn->code == MIR_INLINE) nop = 1;
+        if (insn->code == MIR_LADDR || insn->code == MIR_CALL)
+          nop = 1;
         op = insn->ops[nop];
         gen_assert (op.mode == MIR_OP_LABEL || (start_ch == 'L' && op.mode == MIR_OP_REF));
         lr.abs_addr_p = FALSE;
@@ -2446,7 +2525,11 @@ static int target_memory_ok_p (gen_ctx_t gen_ctx, MIR_op_t *op_ref) {
   gen_assert (op_ref->mode == MIR_OP_VAR_MEM);
   MIR_context_t ctx = gen_ctx->ctx;
   size_t size = _MIR_type_size (ctx, op_ref->u.var_mem.type);
-  int scale = gen_int_log2 ((int64_t) size);
+  /* The scaled forms encode disp/size and require mem.scale == size:
+     pattern_match_p checks both with `1 << (ch - '0')`, i.e. the access size
+     in bytes.  Comparing against its log2 here made this disagree with the
+     encoder in both directions.  */
+  int scale = (int) size;
 
   if (op_ref->u.var_mem.disp == 0
       && ((op_ref->u.var_mem.index == MIR_NON_VAR || op_ref->u.var_mem.scale == 1

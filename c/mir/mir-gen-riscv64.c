@@ -256,7 +256,7 @@ static void gen_blk_mov (gen_ctx_t gen_ctx, MIR_insn_t anchor, size_t to_disp,
   if (save_regs > 1)
     gen_mov (gen_ctx, anchor, MIR_MOV, _MIR_new_var_op (ctx, A1_HARD_REG), treg_op2);
   if (save_regs > 2)
-    gen_mov (gen_ctx, anchor, MIR_MOV, _MIR_new_var_op (ctx, R2_HARD_REG), treg_op3);
+    gen_mov (gen_ctx, anchor, MIR_MOV, _MIR_new_var_op (ctx, A2_HARD_REG), treg_op3);
 }
 
 #define FMVXW_CODE 0
@@ -280,7 +280,7 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
   MIR_insn_t curr_prev_call_insn = prev_call_insn;
 
   assert (__SIZEOF_LONG_DOUBLE__ == 16);
-  if (call_insn->code == MIR_INLINE) call_insn->code = MIR_CALL;
+  if (call_insn->code == MIR_INLAY || call_insn->code == MIR_INLINE) call_insn->code = MIR_CALL;
   if (proto->args == NULL) {
     nargs = 0;
   } else {
@@ -388,16 +388,22 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
         }
         continue;
       }
-      /* Put on stack and pass the address: */
-      gen_blk_mov (gen_ctx, call_insn, blk_offset, SP_HARD_REG, arg_op.u.mem.base, qwords,
-                   int_arg_num);
+      /* Put on stack and pass the address.  The copy and the address
+         computation must stay BEFORE all the argument hard reg loads: for
+         qwords > 16 the copy is a call to mir.blk_mov, which would clobber
+         argument values already loaded into caller-saved regs (fa0-fa7,
+         a0-a7) if emitted next to the call insn.  Advance
+         curr_prev_call_insn to the ADD itself so several block args keep
+         this prologue region contiguous.  */
+      MIR_reg_t blk_base_reg = arg_op.u.mem.base;
       arg_op = _MIR_new_var_op (ctx, gen_new_temp_reg (gen_ctx, MIR_T_I64, func));
       gen_assert (curr_prev_call_insn
                   != NULL); /* call_insn should not be 1st after simplification */
       new_insn = MIR_new_insn (gen_ctx->ctx, MIR_ADD, arg_op, _MIR_new_var_op (ctx, SP_HARD_REG),
                                MIR_new_int_op (ctx, blk_offset));
       gen_add_insn_after (gen_ctx, curr_prev_call_insn, new_insn);
-      curr_prev_call_insn = DLIST_NEXT (MIR_insn_t, new_insn);
+      gen_blk_mov (gen_ctx, new_insn, blk_offset, SP_HARD_REG, blk_base_reg, qwords, 0);
+      curr_prev_call_insn = new_insn;
       blk_offset += qwords * 8;
     }
     if ((arg_reg
@@ -1738,13 +1744,12 @@ static const struct pattern patterns[] = {
   {MIR_D2F, "r r", "O53 F7 f20 hS1 rd0 rs1"}, /* fcvt.s.d rd,rs1 */
 // i2ld, ui2ld, ld2i, f2ld, d2ld, ld2f, ld2d are builtins
 
+/* MIR_INLINE and MIR_INLAY are machinized into MIR_CALL: */
 #if COMPRESS_INSNS
   {MIR_CALL, "X r $", "o2 b9 rd1"},   /* c.jalr rd */
-  {MIR_INLINE, "X r $", "o2 b9 rd1"}, /* c.jalr rd */
   {MIR_RET, "$", "o2 b8 hd1"},        /* c.jr ra  */
 #endif
   {MIR_CALL, "X r $", "O67 F0 hd1 rs1 i0"},   /* jalr rd,rs1 */
-  {MIR_INLINE, "X r $", "O67 F0 hd1 rs1 i0"}, /* jalr rd,rs1 */
   {MIR_RET, "$", "O67 F0 hd0 hs1 i0"},        /* jalr hr0,hr1,0  */
 
   {MIR_JCALL, "X r $", "O67 F0 hd0 rs1 i0"}, /* jmp *r: jalr zero,r,0 */
@@ -2552,7 +2557,8 @@ static void out_insn (gen_ctx_t gen_ctx, MIR_insn_t insn, const char *replacemen
       case 'L':
       case 'U':
         n = 0;
-        if (insn->code == MIR_CALL || insn->code == MIR_INLINE || insn->code == MIR_LADDR) n = 1;
+        if (insn->code == MIR_CALL || insn->code == MIR_LADDR)
+          n = 1;
         op = insn->ops[n];
         gen_assert (op.mode == MIR_OP_LABEL || op.mode == MIR_OP_REF);
         lr.abs_addr_p = FALSE;

@@ -45,6 +45,10 @@ unittest
     MIR_finish_func(ctx);
     MIR_finish_module(ctx);
 
+    assert(MIR_get_module_item(ctx, m, "sum") is item);
+    assert(MIR_get_global_item(ctx, "sum") is item);
+    assert(MIR_get_global_item(ctx, "nope") is null);
+
     MIR_load_module(ctx, m);
     MIR_gen_init(ctx);
     MIR_gen_set_optimize_level(ctx, 2);
@@ -64,6 +68,7 @@ unittest
     assert(!MIR_int_type_p(MIR_T_F));
     assert(MIR_fp_type_p(MIR_T_D));
     assert(MIR_call_code_p(MIR_CALL) && MIR_call_code_p(MIR_JCALL));
+    assert(MIR_call_code_p(MIR_INLINE) && MIR_call_code_p(MIR_INLAY));
     assert(MIR_branch_code_p(MIR_JMP) && MIR_branch_code_p(MIR_BLT));
     assert(!MIR_branch_code_p(MIR_ADD));
 }

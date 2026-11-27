@@ -25,6 +25,10 @@ static char aarch64_mirc[]
     "#define __ORDER_LITTLE_ENDIAN__ 1234\n"
     "#define __ORDER_BIG_ENDIAN__ 4321\n"
     "#define __AARCH64EL__ 1\n"
+#if !defined(__APPLE__) && !defined(_WIN32)
+    /* the AAPCS64 linux ABI: plain char is unsigned (caarch64.h mir_char) */
+    "#define __CHAR_UNSIGNED__ 1\n"
+#endif
     "\n"
     "/* Some GCC predefined macros: */\n"
     "#define __SIZE_TYPE__ unsigned long\n"
@@ -52,11 +56,13 @@ static char aarch64_mirc[]
     "#define __UINT32_MAX__ (__INT32_MAX__ * 2u + 1u)\n"
     "#define __UINT64_MAX__ (__INT64_MAX__ * 2u + 1u)\n"
 #if defined(__linux__)
-    "#define __WCHAR_MAX__ 0x7fffffff\n"
+    /* wchar_t is unsigned int in AAPCS64 */
+    "#define __WCHAR_MAX__ 4294967295u\n"
+    "#define __WCHAR_MIN__ 0u\n"
 #else
     "#define __WCHAR_MAX__ 2147483647\n"
-#endif
     "#define __WCHAR_MIN__ (-__WCHAR_MAX__ - 1)\n"
+#endif
     "#define __SCHAR_MAX__ __INT8_MAX__\n"
     "#define __SHRT_MAX__ __INT16_MAX__\n"
     "#define __INT_MAX__ __INT32_MAX__\n"
@@ -138,6 +144,7 @@ static char aarch64_mirc[]
     "#define __ARM_ARCH_8_3__ 1\n"
     "typedef struct {unsigned long hi, lo;} __uint128_t;\n"
     "extern float __nan (void);\n"
+    "#define _Float16 short\n"
 #endif
     "\n"
     "void *alloca (unsigned long);\n";

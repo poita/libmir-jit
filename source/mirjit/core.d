@@ -138,6 +138,7 @@ void MIR_scan_string(MIR_context_t ctx, const(char)* str);
 
 // ---- load / link ----
 MIR_item_t MIR_get_global_item(MIR_context_t ctx, const(char)* name);
+MIR_item_t MIR_get_module_item(MIR_context_t ctx, MIR_module_t module_, const(char)* name);
 void MIR_load_module(MIR_context_t ctx, MIR_module_t m);
 void MIR_load_external(MIR_context_t ctx, const(char)* name, void* addr);
 void MIR_link(MIR_context_t ctx, MIR_set_interface_t set_interface,
@@ -239,8 +240,9 @@ auto mirModules(MIR_context_t ctx) nothrow @nogc
     return Range(list is null ? null : list.head);
 }
 
-/// Find a function item by name across all loaded modules in `ctx`. Use this
-/// instead of MIR_get_global_item (declared in mir.h but not implemented).
+/// Find a function item by name across all modules in `ctx`, whether or not
+/// they have been loaded. Unlike `MIR_get_global_item`, this only returns
+/// function items.
 MIR_item_t mirFindFunc(MIR_context_t ctx, const(char)* name) nothrow @nogc
 {
     import core.stdc.string : strcmp;

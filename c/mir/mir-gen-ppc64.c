@@ -205,8 +205,9 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
   MIR_op_t arg_op, temp_op, arg_reg_op, ret_reg_op, mem_op;
   MIR_insn_code_t new_insn_code, ext_code;
   MIR_insn_t new_insn, ext_insn;
+  MIR_insn_t prev_call_insn = DLIST_PREV (MIR_insn_t, call_insn);
 
-  if (call_insn->code == MIR_INLINE) call_insn->code = MIR_CALL;
+  if (call_insn->code == MIR_INLAY || call_insn->code == MIR_INLINE) call_insn->code = MIR_CALL;
   if (proto->args == NULL) {
     nargs = 0;
   } else {
@@ -290,9 +291,19 @@ static void machinize_call (gen_ctx_t gen_ctx, MIR_insn_t call_insn) {
                  _MIR_new_var_mem_op (ctx, MIR_T_I64, disp, arg_op.u.mem.base, MIR_NON_VAR, 1));
         setup_call_hard_reg_args (gen_ctx, call_insn, R3_HARD_REG + n_iregs);
       }
-      if (qwords > 0)
-        gen_blk_mov (gen_ctx, call_insn, mem_size + PPC64_STACK_HEADER_SIZE, SP_HARD_REG, disp,
-                     arg_op.u.mem.base, qwords, n_iregs);
+      if (qwords > 0) {
+        /* The copy of the block tail must happen BEFORE all the argument
+           hard reg loads: for qwords > 16 it is a call to mir.blk_mov, which
+           would clobber argument values already loaded into caller-saved
+           regs (f1-f13, r3-r10) if emitted next to the call insn.  Anchoring
+           at the insn following prev_call_insn puts it ahead of every arg
+           load emitted so far (SP is fixed here: the param area is part of
+           the frame).  */
+        gen_assert (prev_call_insn != NULL); /* call_insn should not be 1st */
+        gen_blk_mov (gen_ctx, DLIST_NEXT (MIR_insn_t, prev_call_insn),
+                     mem_size + PPC64_STACK_HEADER_SIZE, SP_HARD_REG, disp, arg_op.u.mem.base,
+                     qwords, 0);
+      }
       mem_size += qwords * 8;
       n_iregs += qwords;
       continue;
@@ -1421,6 +1432,7 @@ static const struct pattern patterns[] = {
   {MIR_D2F, "r r", "o63 O12 rt0 rb1"}, /* frsp rt,rb */
                                        // i2ld, ui2ld, ld2i, f2ld, d2ld, ld2f, ld2d are builtins
 
+  /* MIR_INLINE and MIR_INLAY are machinized into MIR_CALL: */
   {MIR_CALL, "X h12 $", "o31 O467 rs1 sr9; o19 O528 BO20 BI0 LK1"}, /* mtctr r12; bcctrl */
   {MIR_CALL, "X r $",
    "o31 O444 ha12 rs1 rb1; o31 O467 rs1 sr9; o19 O528 BO20 BI0 LK1"}, /* mr r12,r; mtctr r; bcctrl
@@ -1463,7 +1475,7 @@ static void target_get_early_clobbered_hard_regs (MIR_insn_t insn, MIR_reg_t *hr
     *hr1 = F0_HARD_REG;
   } else if (code == MIR_LDMOV) { /* if mem base reg is R0 */
     *hr1 = R11_HARD_REG; /* don't use arg regs as ldmov can be used in param passing part */
-  } else if (code == MIR_CALL || code == MIR_INLINE) {
+  } else if (code == MIR_CALL) {
     *hr1 = R12_HARD_REG;
   } else if (code == MIR_SWITCH) {
     *hr1 = R10_HARD_REG;

@@ -278,28 +278,29 @@ enum : MIR_insn_code_t
     MIR_UBNO = 164,
     MIR_CALL = 167,
     MIR_INLINE = 168,
-    MIR_JCALL = 169,
-    MIR_BSTART = 174,
-    MIR_BEND = 175,
-    MIR_PRSET = 182,
-    MIR_PRBEQ = 183,
-    MIR_PRBNE = 184,
+    MIR_INLAY = 169,
+    MIR_JCALL = 170,
+    MIR_BSTART = 175,
+    MIR_BEND = 176,
+    MIR_PRSET = 183,
+    MIR_PRBEQ = 184,
+    MIR_PRBNE = 185,
     MIR_LADDR = 165,
     MIR_JMPI = 166,
-    MIR_SWITCH = 170,
-    MIR_RET = 171,
-    MIR_JRET = 172,
-    MIR_ALLOCA = 173,
-    MIR_VA_ARG = 176,
-    MIR_VA_BLOCK_ARG = 177,
-    MIR_VA_START = 178,
-    MIR_VA_END = 179,
-    MIR_LABEL = 180,
-    MIR_UNSPEC = 181,
-    MIR_USE = 185,
-    MIR_PHI = 186,
-    MIR_INVALID_INSN = 187,
-    MIR_INSN_BOUND = 188,
+    MIR_SWITCH = 171,
+    MIR_RET = 172,
+    MIR_JRET = 173,
+    MIR_ALLOCA = 174,
+    MIR_VA_ARG = 177,
+    MIR_VA_BLOCK_ARG = 178,
+    MIR_VA_START = 179,
+    MIR_VA_END = 180,
+    MIR_LABEL = 181,
+    MIR_UNSPEC = 182,
+    MIR_USE = 186,
+    MIR_PHI = 187,
+    MIR_INVALID_INSN = 188,
+    MIR_INSN_BOUND = 189,
 }
 
 /// MIR_op_mode_t
@@ -440,7 +441,7 @@ pragma(inline, true) @safe @nogc nothrow pure
     bool MIR_all_blk_type_p(MIR_type_t t) { return MIR_T_BLK <= t && t <= MIR_T_RBLK; }
 
     bool MIR_call_code_p(MIR_insn_code_t c)
-    { return c == MIR_CALL || c == MIR_INLINE || c == MIR_JCALL; }
+    { return c == MIR_CALL || c == MIR_INLINE || c == MIR_INLAY || c == MIR_JCALL; }
 
     bool MIR_addr_code_p(MIR_insn_code_t c)
     { return c == MIR_ADDR || c == MIR_ADDR8 || c == MIR_ADDR16 || c == MIR_ADDR32; }
@@ -486,7 +487,7 @@ unittest
     static assert(MIR_str_t.sizeof == 16, "MIR_str_t must be 16 bytes");
     static assert(MIR_reg_t.sizeof == 4 && MIR_disp_t.sizeof == 8);
     static assert(MIR_T_I64 == 6 && MIR_T_P == 11 && MIR_T_RBLK == 17);
-    static assert(MIR_MOV == 0 && MIR_ADD == 34 && MIR_BGE == 154 && MIR_RET == 171);
+    static assert(MIR_MOV == 0 && MIR_ADD == 34 && MIR_BGE == 154 && MIR_RET == 172);
     static assert(MIR_module.sizeof == 56, "MIR_module must be 56 bytes");
     static assert(MIR_module.module_next.offsetof == 40, "module_next at offset 40");
     static assert(MIR_item.sizeof == 72, "MIR_item must be 72 bytes");
